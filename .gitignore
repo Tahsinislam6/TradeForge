@@ -1,0 +1,12 @@
+# Ignore all CSV files in the repository
+*.csv
+*.html
+*.DS_Store
+*.db
+__pycache__/
+.pytest_cache/
+venv/
+.python-version
+*.log
+*.lock
+# If you want to allow specific CSVs, use ! (uncomment and edit as needed)
