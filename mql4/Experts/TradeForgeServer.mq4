@@ -3,6 +3,8 @@
 #include <Zmq/Zmq.mqh>
 #include <JAson.mqh>
 
+#include <Code/indicator.mqh>
+
 Context* context = NULL;
 Socket* socket = NULL;
 
@@ -72,6 +74,11 @@ void OnTimer()
             {
                 Print("PING command received.");
                 reply_json_root = setStatusResponse("SUCCESS", "PONG");
+            }
+            else if (command == "INDICATOR")
+            {   
+                Print("INDICATOR command received.");
+                reply_json_root = SaveIndicatorData(json_data);
             }
             else
             {
