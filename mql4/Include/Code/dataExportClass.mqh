@@ -179,7 +179,7 @@ public:
         if (!getRates()) return;
         
     filename = symbol + IntegerToString(timeframe) + ".csv";
-        file_handle = FileOpen(filename, FILE_WRITE|FILE_CSV, ',');
+        file_handle = FileOpen(filename, FILE_WRITE | FILE_CSV | FILE_COMMON, ',');
     if (!checkFileHandle()) return;
 
         // Write the CSV header
