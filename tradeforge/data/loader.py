@@ -1,14 +1,13 @@
 import pandas as pd
 
 def load_ohlc(file_path: str) -> pd.DataFrame:
-    """
-    Load OHLC data from a CSV file.
+    """Load OHLC data from a CSV file.
 
-    Parameters:
-    file_path (str): The path to the CSV file containing OHLC data.
+    Args:
+        file_path: The path to the CSV file containing OHLC data.
 
     Returns:
-    pd.DataFrame: A DataFrame containing the OHLC data.
+        A DataFrame containing the OHLC data.
     """
     df = pd.read_csv(file_path)
     expected = {"DateTime", "Open", "High", "Low", "Close", "Volume"}
@@ -18,10 +17,19 @@ def load_ohlc(file_path: str) -> pd.DataFrame:
     return df
 
 def load_indicator(file_path:str, num_buffers: int, indicator_name: str | None) -> pd.DataFrame:
-    """
-    Loads an N-buffer indicator CSV file into a pandas DataFrame.
-    DateTime columns are expected.
-    Renames buffer columns if indicator_name is provided.
+    """Loads an N-buffer indicator CSV file into a pandas DataFrame.
+
+    DateTime columns are expected. Renames buffer columns if indicator_name is
+    provided.
+
+    Args:
+        file_path: The path to the CSV file containing indicator data.
+        num_buffers: The number of buffer columns expected in the CSV.
+        indicator_name: Optional name to rename buffer columns with.
+
+    Returns:
+        pd.DataFrame: A DataFrame containing the indicator data with renamed
+            columns if indicator_name is provided.
     """
     df = pd.read_csv(file_path)
     expected = {"DateTime"} | {f'Buffer_Value_{i}' for i in range(num_buffers)}
@@ -32,3 +40,32 @@ def load_indicator(file_path:str, num_buffers: int, indicator_name: str | None) 
         buffer_rename = {f'Buffer_Value_{i}': f'{indicator_name}_Buffer_{i}' for i in range(num_buffers)}
         df.rename(columns=buffer_rename, inplace=True)
     return df
+
+def merge_dataframes(main_df, *other_dfs):
+    """
+    Merges multiple DataFrames into a main DataFrame based on 'DateTime' column.
+
+    Args:
+        main_df (pd.DataFrame): The primary DataFrame to merge into.
+        *other_dfs (pd.DataFrame): Variable number of other DataFrames to merge.
+
+    Returns:
+        pd.DataFrame: The merged DataFrame.
+    """
+    merged_df = main_df.copy()
+    for df_to_merge in other_dfs:
+        # Ensure 'DateTime' column is present in the DataFrame to merge
+        if 'DateTime' not in df_to_merge.columns:
+            raise ValueError("All DataFrames to merge must contain a 'DateTime' column.")
+
+        # Select columns to merge: 'DateTime', and all other columns
+        cols_to_use = [col for col in df_to_merge.columns]
+
+        # Perform the merge on 'DateTime'
+        merged_df = pd.merge(
+            merged_df,
+            df_to_merge[cols_to_use],
+            on='DateTime',
+            how='left'
+        )
+    return merged_df
