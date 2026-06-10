@@ -178,7 +178,7 @@ public:
         if (!getAvailableBars()) return;
         if (!getRates()) return;
         
-    filename = symbol + IntegerToString(timeframe) + ".csv";
+    filename = symbol + "_" + IntegerToString(timeframe) + ".csv";
         file_handle = FileOpen(filename, FILE_WRITE | FILE_CSV | FILE_COMMON, ',');
     if (!checkFileHandle()) return;
 
