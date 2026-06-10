@@ -17,7 +17,7 @@ def load_ohlc(file_path: str) -> pd.DataFrame:
         raise ValueError(f"CSV is missing required columns: {missing}")
     return df
 
-def load_indicator(file_path:str, num_buffers: int, indicator_name: str) -> pd.DataFrame:
+def load_indicator(file_path:str, num_buffers: int, indicator_name: str | None) -> pd.DataFrame:
     """
     Loads an N-buffer indicator CSV file into a pandas DataFrame.
     DateTime columns are expected.
