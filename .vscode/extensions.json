@@ -1,6 +1,6 @@
 {
     "recommendations": [
-		"nervtech.mq4",
-        "ms-python.python"
+        "ms-python.python",
+        "nervtech.mq4"
     ]
 }

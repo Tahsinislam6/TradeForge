@@ -101,6 +101,13 @@ public:
         status = false;
     }
 
+    // Constructor for OHLC data export
+    DataExportClass(string src_symbol, ENUM_TIMEFRAMES src_timeframe){
+        this.symbol = src_symbol;
+        this.timeframe = src_timeframe;
+        status = false;
+    }
+
 
     // Method to export indicator data
     void ExportIndicatorData(){
@@ -163,6 +170,43 @@ public:
             return;
         }
         Print("Successfully saved indicator data to ", filename);
+        status = true;
+    }
+
+    void ExportOHLCData(){
+        if (!checkSymbol()) return;
+        if (!getAvailableBars()) return;
+        if (!getRates()) return;
+        
+    filename = symbol + "_" + IntegerToString(timeframe) + ".csv";
+        file_handle = FileOpen(filename, FILE_WRITE | FILE_CSV | FILE_COMMON, ',');
+    if (!checkFileHandle()) return;
+
+        // Write the CSV header
+        FileWrite(file_handle, "DateTime", "Open", "High", "Low", "Close", "Volume");
+    int rateSize = ArraySize(rates) - 1;
+        int digits = (int)MarketInfo(symbol, MODE_DIGITS);
+        
+        // Loop through the data (oldest to newest index)
+        for(int j = 0; j < rateSize; j++)
+        {
+            // Use continue logic (same as original)
+            if (TimeYear(rates[j].time) < MAX_START_YEAR) 
+            {
+                continue; // Skip bar older than 2017
+            }
+            
+            FileWrite(file_handle, 
+                TimeToString(rates[j].time, TIME_DATE | TIME_MINUTES),
+                DoubleToString(rates[j].open, digits),
+                DoubleToString(rates[j].high, digits),
+                DoubleToString(rates[j].low, digits),
+                DoubleToString(rates[j].close, digits),
+                IntegerToString(rates[j].tick_volume));
+        }
+
+        FileClose(file_handle);
+        Print("Successfully saved ", rateSize, " bars of data to ", filename);
         status = true;
     }
 

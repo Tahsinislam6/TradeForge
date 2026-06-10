@@ -4,6 +4,7 @@
 #include <JAson.mqh>
 
 #include <Code/indicator.mqh>
+#include <Code/ohlc.mqh>
 
 Context* context = NULL;
 Socket* socket = NULL;
@@ -79,6 +80,11 @@ void OnTimer()
             {   
                 Print("INDICATOR command received.");
                 reply_json_root = SaveIndicatorData(json_data);
+            }
+            else if (command == "OHLC")
+            {
+                Print("OHLC command received.");
+                reply_json_root = SaveOHLCVData(json_data);
             }
             else
             {
