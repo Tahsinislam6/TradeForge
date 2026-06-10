@@ -119,9 +119,9 @@ def main():
         metrics = baseline_backtest(
             indicator_name=indicator_name,
             currencies=currencies,
-            charts_dir=str(Config.COMMON_DIR),
-            indicators_dir=str(Config.COMMON_DIR),
-            atr_dir=str(Config.COMMON_DIR),
+            charts_dir=(Config.COMMON_DIR),
+            indicators_dir=(Config.COMMON_DIR),
+            atr_dir=(Config.COMMON_DIR),
             trial_number=1,
             print_results=args.verbose,
         )
