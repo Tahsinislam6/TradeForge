@@ -180,8 +180,8 @@ class BaselineCurrencyTest:
         run_ids = (working_df["side"] != working_df["side"].shift()).cumsum()
         runs = run_ids.unique()
 
-        # Drop incomplete boundary runs
-        valid_runs = runs[1:-1] if len(runs) > 2 else runs
+        # Drop incomplete boundary runs; with ≤2 runs every run is a boundary run
+        valid_runs = runs[1:-1] if len(runs) > 2 else runs[:0]
 
         run_metrics = []
         for run_id in valid_runs:
@@ -215,8 +215,8 @@ class BaselineCurrencyTest:
             self.trend_capture = 0.0
             return
 
-        # Whipsaw frequency: runs < 3 bars
-        whipsaws = run_df[run_df["bars_held"] < 3]
+        # Whipsaw frequency: runs ≤ 3 bars (NNFX: reverses within 3 bars)
+        whipsaws = run_df[run_df["bars_held"] <= 3]
         self.whipsaw_frequency = (len(whipsaws) / len(run_df)) * 100
 
         # Average bars held

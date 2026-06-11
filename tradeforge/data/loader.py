@@ -62,13 +62,9 @@ def merge_dataframes(main_df, *other_dfs):
         if 'DateTime' not in df_to_merge.columns:
             raise ValueError("All DataFrames to merge must contain a 'DateTime' column.")
 
-        # Select columns to merge: 'DateTime', and all other columns
-        cols_to_use = [col for col in df_to_merge.columns]
-
-        # Perform the merge on 'DateTime'
         merged_df = pd.merge(
             merged_df,
-            df_to_merge[cols_to_use],
+            df_to_merge,
             on='DateTime',
             how='left'
         )

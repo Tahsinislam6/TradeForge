@@ -135,8 +135,10 @@ def main():
         )
     except FileNotFoundError as e:
         print_error(f"File not found: {e}")
+        return
     except Exception as e:
         print_error(f"Analysis failed: {e}")
+        return
 
     # Display results
     print_header("RESULTS")
