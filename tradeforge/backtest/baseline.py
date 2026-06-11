@@ -121,7 +121,6 @@ class BaselineCurrencyTest:
         indicator_df = load_indicator(self.indicator_path, 1, "Baseline")
         df = merge_dataframes(self.merged_df, indicator_df)
         
-
         return df
 
     def run(self) -> None:

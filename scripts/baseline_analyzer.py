@@ -6,6 +6,7 @@ import sys
 from tradeforge.backtest.baseline import baseline_backtest
 from tradeforge.config import Config
 from tradeforge.data.loader import load_static_data
+from tradeforge.data.request import request_indicator
 
 
 def print_header(title: str):
@@ -117,8 +118,10 @@ def main():
     print("\n  Loading data...")
     try:
         cached_data = load_static_data(currencies)
+        request_indicator(currencies, parameters=parameters, indicator_name=indicator_name, buffer_values=0, trial_number=0)
+
     except Exception as e:
-        print_error(f"Failed to load static data: {e}")
+        print_error(f"Failed to load data: {e}")
         return
 
     # Run analysis
