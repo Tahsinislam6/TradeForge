@@ -1,8 +1,8 @@
 import pandas as pd
 import os
 
-from request import request_ohlc, request_indicator
-from config import Config
+from tradeforge.data.request import request_ohlc, request_indicator
+from tradeforge.config import Config
 
 def load_ohlc(file_path: str) -> pd.DataFrame:
     """Load OHLC data from a CSV file.
@@ -75,19 +75,29 @@ def merge_dataframes(main_df, *other_dfs):
     return merged_df
 
 def load_static_data(currencies: list[str]):
+    """
+    Load static OHLC and ATR data for each currency.
+
+    Args:
+        currencies: Currency symbols to load.
+
+    Returns:
+        A dictionary keyed by currency symbol containing the merged data frame.
+    """
     if not request_ohlc(currencies):
         raise RuntimeError("Failed to request OHLC data from MT4 EA.")
     if not request_indicator(currencies, parameters=14, indicator_name="ATR", buffer_values=0):
         raise RuntimeError("Failed to request ATR indicator data from MT4 EA.")
     cached_data = {}
     for currency in currencies:
-        ohlc_path = os.path.join(Config.DATA_DIR, f"{currency}_1440.csv")
+        ohlc_path = os.path.join(Config.COMMON_DIR, f"{currency}_1440.csv")
         data = load_ohlc(ohlc_path)
 
-        atr_path = os.path.join(Config.DATA_DIR, f"{currency}_ATR_1440.csv")
+        atr_path = os.path.join(Config.COMMON_DIR, f"{currency}_ATR_1440_0.csv")
         atr_df = load_indicator(atr_path, num_buffers=1, indicator_name="ATR")
 
         data = merge_dataframes(data, atr_df)
 
         cached_data[currency] = data
     return cached_data
+
