@@ -9,4 +9,7 @@ venv/
 .python-version
 *.log
 *.lock
+.env
+.env.local
+*.env
 # If you want to allow specific CSVs, use ! (uncomment and edit as needed)

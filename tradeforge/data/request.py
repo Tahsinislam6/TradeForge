@@ -50,7 +50,7 @@ def request_indicator(currencies: list[str], parameters, indicator_name: str, bu
         "indicators": {indicator_name: {"indicator_params": _as_list(parameters), "buffer_values": _as_list(buffer_values)}},
         "trial_number": trial_number})
     
-    if response.get("status") == "OK":
+    if response.get("status") == "OK" and response.get("trial_number") == trial_number:
         return True
     else:
         print(f"Error requesting Indicator data")

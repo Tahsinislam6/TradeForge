@@ -7,64 +7,12 @@ from tradeforge.backtest.baseline import baseline_backtest
 from tradeforge.config import Config
 from tradeforge.data.loader import load_static_data
 from tradeforge.data.request import request_indicator
-
-
-def print_header(title: str):
-    """Print a formatted header."""
-    print("\n" + "=" * 70)
-    print(f"  {title}")
-    print("=" * 70)
-
-
-def print_success(message: str):
-    """Print success message."""
-    print(f"✓ {message}")
+from tradeforge.utils.display import format_metrics, parse_number, print_header
 
 
 def print_error(message: str):
-    """Print error message."""
     print(f"✗ {message}")
     sys.exit(1)
-
-
-def parse_number(value: str):
-    """Parse an argument as an int when possible, otherwise as a float."""
-    try:
-        return int(value)
-    except ValueError:
-        return float(value)
-
-
-def format_metrics(metrics) -> str:
-    """Format metrics for display."""
-    lines = []
-
-    if metrics.whipsaw_frequency is not None:
-        status = "✓ GOOD" if metrics.whipsaw_frequency <= Config.BASELINE_MAX_WHIPSAW_FREQUENCY else "✗ HIGH"
-        lines.append(f"  Whipsaw Frequency:    {metrics.whipsaw_frequency:7.2f}%  [{status}]")
-    else:
-        lines.append(f"  Whipsaw Frequency:    {'N/A':>7}  [? UNAVAILABLE]")
-
-    if metrics.avg_bars_held is not None:
-        status = "✓ GOOD" if metrics.avg_bars_held >= Config.BASELINE_MIN_AVG_BARS_HELD else "✗ LOW"
-        lines.append(f"  Avg Bars Held:        {metrics.avg_bars_held:7.2f}   [{status}]")
-    else:
-        lines.append(f"  Avg Bars Held:        {'N/A':>7}   [? UNAVAILABLE]")
-
-    if metrics.trend_capture is not None:
-        status = "✓ GOOD" if metrics.trend_capture >= Config.BASELINE_MIN_TREND_CAPTURE else "✗ LOW"
-        lines.append(f"  Trend Capture (ATR):  {metrics.trend_capture:7.4f}  [{status}]")
-    else:
-        lines.append(f"  Trend Capture (ATR):  {'N/A':>7}  [? UNAVAILABLE]")
-
-    if metrics.distance_atr_ratio is not None:
-        in_range = Config.BASELINE_MIN_ATR_RATIO <= metrics.distance_atr_ratio <= Config.BASELINE_MAX_ATR_RATIO
-        status = "✓ GOOD" if in_range else "✗ OUT OF RANGE"
-        lines.append(f"  Distance/ATR Ratio:   {metrics.distance_atr_ratio:7.4f}  [{status}]")
-    else:
-        lines.append(f"  Distance/ATR Ratio:   {'N/A':>7}  [? UNAVAILABLE]")
-
-    return "\n".join(lines)
 
 
 def main():
