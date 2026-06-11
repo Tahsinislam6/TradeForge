@@ -15,7 +15,8 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from tradeforge.data.loader import load_ohlc, load_indicator, merge_dataframes
+from tradeforge.config import Config
+from tradeforge.data.loader import load_indicator, merge_dataframes
 
 @dataclass
 class BaselineMetrics:
@@ -39,12 +40,9 @@ class BaselineMetrics:
 
 
 def baseline_backtest(
+    data: dict[str, pd.DataFrame],
     indicator_name: str,
-    currencies: list[str],
-    charts_dir: str,
-    indicators_dir: str,
-    atr_dir: str,
-    trial_number: int = 1,
+    trial_number: int = 0,
     print_results: bool = False,
 ) -> BaselineMetrics:
     """
@@ -53,9 +51,6 @@ def baseline_backtest(
     Args:
         indicator_name: Name of the baseline indicator
         currencies: List of currency pairs to test
-        charts_dir: Path to OHLC data directory
-        indicators_dir: Path to indicator data directory
-        atr_dir: Path to ATR data directory
         trial_number: Trial ID for file matching
         print_results: Print formatted results to stdout
 
@@ -64,22 +59,21 @@ def baseline_backtest(
     """
     results = []
 
-    for currency in currencies:
-        ohlc_path = os.path.join(charts_dir, f"{currency}1440.csv")
+    for currency, merged_df in data.items():
+
         indicator_pattern = f"{currency}_{indicator_name}_1440_{trial_number}.csv"
-        indicator_path = os.path.join(indicators_dir, indicator_pattern)
-        atr_path = os.path.join(atr_dir, f"{currency}_ATR_1440.csv")
+        indicator_path = os.path.join(Config.COMMON_DIR, indicator_pattern)
 
         if not os.path.exists(indicator_path):
             print(f"Skipping {currency}: Missing indicator file at {indicator_path}")
             continue
 
         try:
-            test = BaselineCurrencyTest(ohlc_path, indicator_path, atr_path)
+            test = BaselineCurrencyTest(indicator_path, merged_df=merged_df)
             test.run()
             results.append(test)
         except Exception as e:
-            print(f"Error analyzing {currency}: {e}")
+            print(f"Error analyzing {currency} from cache: {e}")
             continue
 
     if not results:
@@ -107,12 +101,14 @@ def baseline_backtest(
 
 
 class BaselineCurrencyTest:
-    """Single-currency baseline quality test."""
+    """Single-currency baseline quality test.
 
-    def __init__(self, ohlc_path: str, indicator_path: str, atr_path: str):
-        self.ohlc_path = ohlc_path
+    Accepts a pre-merged DataFrame produced by the data loader.
+    """
+
+    def __init__(self, indicator_path: str, merged_df: pd.DataFrame):
         self.indicator_path = indicator_path
-        self.atr_path = atr_path
+        self.merged_df = merged_df
 
         self.whipsaw_frequency: Optional[float] = None
         self.avg_bars_held: Optional[float] = None
@@ -120,17 +116,13 @@ class BaselineCurrencyTest:
         self.distance_atr_ratio: Optional[float] = None
 
     def prepare_data(self) -> pd.DataFrame:
-        """Load and merge OHLC, baseline, and ATR data."""
-        data = load_ohlc(self.ohlc_path, header=True, parse_dates=True)
+        """Merge baselinedata."""
+        # Use provided merged DataFrame; assume it contains the indicator and ATR columns
         indicator_df = load_indicator(self.indicator_path, 1, "Baseline")
-        atr_df = load_indicator(self.atr_path, 1, "ATR")
-        data = merge_dataframes(data, indicator_df, atr_df)
+        df = merge_dataframes(self.merged_df, indicator_df)
+        
 
-        # Set datetime index
-        data.index = pd.to_datetime(data["Date"] + " " + data["Time"])
-        data.drop(["Date", "Time"], axis=1, inplace=True)
-
-        return data
+        return df
 
     def run(self) -> None:
         """Load data and calculate baseline metrics."""
@@ -141,9 +133,9 @@ class BaselineCurrencyTest:
         """Calculate NNFX baseline metrics."""
         working_df = df.copy()
 
-        # Detect and normalize column names
+        # Detect and normalize column names    
         baseline_col = self._find_column(working_df, ["Baseline_Buffer_0", "baseline"])
-        atr_col = self._find_column(working_df, ["ATR_Buffer_0", "atr"])
+        atr_col = self._find_column(working_df, ["ATR_Buffer_0", "atr"]) 
 
         if not baseline_col:
             raise ValueError("Baseline column not found (expected 'Baseline_Buffer_0' or 'baseline')")

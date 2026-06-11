@@ -5,6 +5,7 @@ import sys
 
 from tradeforge.backtest.baseline import baseline_backtest
 from tradeforge.config import Config
+from tradeforge.data.loader import load_static_data
 
 
 def print_header(title: str):
@@ -113,16 +114,20 @@ def main():
     print(f"  Parameters: {parameters}")
     print(f"  Currencies: {len(currencies)} ({', '.join(currencies[:3])}{'...' if len(currencies) > 3 else ''})")
 
+    print("\n  Loading data...")
+    try:
+        cached_data = load_static_data(currencies)
+    except Exception as e:
+        print_error(f"Failed to load static data: {e}")
+        return
+
     # Run analysis
     print("\n  Starting analysis...")
     try:
         metrics = baseline_backtest(
+            data=cached_data,
             indicator_name=indicator_name,
-            currencies=currencies,
-            charts_dir=(Config.COMMON_DIR),
-            indicators_dir=(Config.COMMON_DIR),
-            atr_dir=(Config.COMMON_DIR),
-            trial_number=1,
+            trial_number=0,
             print_results=args.verbose,
         )
     except FileNotFoundError as e:
