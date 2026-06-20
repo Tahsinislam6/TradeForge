@@ -1,3 +1,7 @@
 backtesting
 pyzmq
 requests
+optuna
+optuna-dashboard
+python-dotenv
+
