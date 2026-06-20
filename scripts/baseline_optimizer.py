@@ -41,8 +41,10 @@ def objective(trial: optuna.Trial, indicator_name: str, currencies: list, cached
 
     trial_number = trial.number
     parameters = [
-        trial.suggest_int("param1", 60, 150),
-        trial.suggest_int("param2", 60, 150),
+        trial.suggest_int("param1", 1, 100),
+        0,
+        3,
+        id
     ]
 
     try:
@@ -92,7 +94,7 @@ def run_optimization(indicator_name: str, currencies: list = None, id: int = Non
         raise RuntimeError(f"Failed to load data before optimisation: {e}") from e
 
     study = optuna.create_study(
-        directions=["minimize", "maximize"],  # Minimize whipsaw frequency, maximize bars held
+        directions=["minimize", "maximize"],
         sampler=NSGAIISampler(constraints_func=get_constraint_violations),
         storage=JournalStorage(JournalFileBackend(file_path=str(Path(__file__).parent.parent / "journal.log"))),
         study_name=indicator_name + "_baseline_optimization" + (f"_{id}" if id is not None else ""),
@@ -100,7 +102,7 @@ def run_optimization(indicator_name: str, currencies: list = None, id: int = Non
     )
     study.optimize(
         lambda trial: objective(trial, indicator_name, currencies, cached_data, id),
-        n_trials=300,
+        n_trials=150,
         show_progress_bar=False,
         gc_after_trial=True,
     )
@@ -129,7 +131,8 @@ def evaluate_trial(
 
 
 if __name__ == "__main__":
-    indicator_name = "VIDYA"
-    run_optimization(indicator_name)
+    indicator_name = "hma_modified"
+    for id in range(8):
+        run_optimization(indicator_name, id=id)
     send_notification("Baseline optimization completed")
 

@@ -2,6 +2,7 @@ import pandas as pd
 import os
 
 from tradeforge.data.request import request_ohlc, request_indicator
+from tradeforge.data.cleanup import clear_external_files
 from tradeforge.config import Config
 
 def load_ohlc(file_path: str) -> pd.DataFrame:
@@ -80,6 +81,7 @@ def load_static_data(currencies: list[str]):
     Returns:
         A dictionary keyed by currency symbol containing the merged data frame.
     """
+    clear_external_files(Config.COMMON_DIR)
     if not request_ohlc(currencies):
         raise RuntimeError("Failed to request OHLC data from MT4 EA.")
     if not request_indicator(currencies, parameters=14, indicator_name="ATR", buffer_values=0):
