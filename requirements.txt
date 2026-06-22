@@ -1,4 +1,3 @@
-backtesting
 pyzmq
 requests
 optuna

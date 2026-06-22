@@ -1,7 +1,6 @@
+import argparse
 import optuna
 from pathlib import Path
-from optuna.storages import JournalStorage
-from optuna.storages.journal import JournalFileBackend
 from optuna.samplers import NSGAIISampler
 
 from tradeforge.backtest.baseline import baseline_backtest, BaselineMetrics
@@ -18,33 +17,29 @@ FAILED_TRIAL_VALUE = 1e6
 def get_constraint_violations(trial):
     """Return per-constraint violation magnitudes for NSGAIISampler.
 
-    Each value is 0.0 if the constraint is satisfied, or a positive float
-    proportional to the degree of violation. Trials with any value > 0 are
-    ranked below all feasible trials in Pareto sorting.
+    Reads only from trial.values, which is guaranteed to be present for
+    COMPLETE trials — unlike user_attrs, which can be stale in the frozen_trial
+    snapshot passed to after_trial by Optuna's internal cache.
 
     Returns:
         Tuple of (whipsaw_violation, distance_atr_violation, avg_bars_violation).
     """
     whipsaw_frequency = trial.user_attrs.get("whipsaw_frequency")
-    distance_atr_ratio = trial.user_attrs.get("distance_atr_ratio")
     avg_bars_held = trial.user_attrs.get("avg_bars_held")
-    if whipsaw_frequency is None or distance_atr_ratio is None or avg_bars_held is None:
+    distance_atr_ratio = trial.user_attrs.get("distance_atr_ratio")
+    if any(v is None for v in (whipsaw_frequency, avg_bars_held, distance_atr_ratio)):
         return (FAILED_TRIAL_VALUE, FAILED_TRIAL_VALUE, FAILED_TRIAL_VALUE)
-    whipsaw_violation = max(0.0, float(whipsaw_frequency) - Config.BASELINE_MAX_WHIPSAW_FREQUENCY)
-    distance_val = float(distance_atr_ratio)
-    distance_violation = max(0.0, distance_val - Config.BASELINE_MAX_ATR_RATIO, Config.BASELINE_MIN_ATR_RATIO - distance_val)
-    avg_bars_violation = max(0.0, Config.BASELINE_MIN_AVG_BARS_HELD - float(avg_bars_held))
+    whipsaw_violation = max(0.0, whipsaw_frequency - Config.BASELINE_MAX_WHIPSAW_FREQUENCY)
+    distance_violation = max(0.0, distance_atr_ratio - Config.BASELINE_MAX_ATR_RATIO, Config.BASELINE_MIN_ATR_RATIO - distance_atr_ratio)
+    avg_bars_violation = max(0.0, Config.BASELINE_MIN_AVG_BARS_HELD - avg_bars_held)
     return (whipsaw_violation, distance_violation, avg_bars_violation)
 
 
-def objective(trial: optuna.Trial, indicator_name: str, currencies: list, cached_data: dict, id: int = None):
+def objective(trial: optuna.Trial, indicator_name: str, currencies: list, cached_data: dict, fixed_params: list[int] | None = None):
 
     trial_number = trial.number
     parameters = [
-        trial.suggest_int("param1", 1, 100),
-        0,
-        3,
-        id
+        trial.suggest_int("param1", 1, 100)
     ]
 
     try:
@@ -58,18 +53,18 @@ def objective(trial: optuna.Trial, indicator_name: str, currencies: list, cached
     except Exception:
         raise optuna.exceptions.TrialPruned()
 
-    trial.set_user_attr("whipsaw_frequency", metrics.whipsaw_frequency)
-    trial.set_user_attr("avg_bars_held", metrics.avg_bars_held)
     trial.set_user_attr("distance_atr_ratio", metrics.distance_atr_ratio)
     trial.set_user_attr("trend_capture", metrics.trend_capture)
+    trial.set_user_attr("whipsaw_frequency", metrics.whipsaw_frequency)
+    trial.set_user_attr("avg_bars_held", metrics.avg_bars_held)
 
     if metrics.whipsaw_frequency is None:
         raise optuna.exceptions.TrialPruned()
 
-    return metrics.whipsaw_frequency, metrics.avg_bars_held
+    return metrics.whipsaw_frequency, metrics.avg_bars_held, metrics.distance_atr_ratio
 
 
-def run_optimization(indicator_name: str, currencies: list = None, id: int = None):
+def run_optimization(indicator_name: str, n_trials: int, currencies: list = None, fixed_params: list[int] | None = None):
     """Run NSGA-II multi-objective optimisation over the indicator's parameters.
 
     Minimises whipsaw frequency and maximises average bars held, with hard
@@ -80,9 +75,9 @@ def run_optimization(indicator_name: str, currencies: list = None, id: int = Non
     Args:
         indicator_name: MT4 indicator name (e.g. 'VIDYA', 'EMA').
         currencies: Currency pairs to test. Defaults to Config.CURRENCIES.
-        id: Fixed second parameter passed to the indicator on every trial
-            (e.g. MA type selector). Also appended to the study name so
-            separate studies are kept per variant.
+        fixed_params: Zero, one, or two fixed parameters appended after the
+            optimised param1 on every trial (e.g. [ma_type] or [ma_type, period]).
+            Also encoded into the study name so each variant gets its own study.
 
     Returns:
         The completed optuna.Study object.
@@ -93,16 +88,18 @@ def run_optimization(indicator_name: str, currencies: list = None, id: int = Non
     except Exception as e:
         raise RuntimeError(f"Failed to load data before optimisation: {e}") from e
 
+    suffix = ("_" + "_".join(str(p) for p in fixed_params)) if fixed_params else ""
     study = optuna.create_study(
-        directions=["minimize", "maximize"],
+        directions=["minimize", "maximize", "minimize"],
         sampler=NSGAIISampler(constraints_func=get_constraint_violations),
-        storage=JournalStorage(JournalFileBackend(file_path=str(Path(__file__).parent.parent / "journal.log"))),
-        study_name=indicator_name + "_baseline_optimization" + (f"_{id}" if id is not None else ""),
+        storage="sqlite:///" + str(Path(__file__).parent.parent / "optuna.db"),
+        # optuna-dashboard sqlite:///optuna.db
+        study_name=indicator_name + "_baseline_optimization" + suffix,
         load_if_exists=True,
     )
     study.optimize(
-        lambda trial: objective(trial, indicator_name, currencies, cached_data, id),
-        n_trials=150,
+        lambda trial: objective(trial, indicator_name, currencies, cached_data, fixed_params),
+        n_trials=n_trials,
         show_progress_bar=False,
         gc_after_trial=True,
     )
@@ -131,8 +128,14 @@ def evaluate_trial(
 
 
 if __name__ == "__main__":
-    indicator_name = "hma_modified"
-    for id in range(8):
-        run_optimization(indicator_name, id=id)
+    import itertools
+    parser = argparse.ArgumentParser(description="Run NSGA-II baseline optimisation for an MT4 indicator.")
+    parser.add_argument("indicator_name", type=str, help="MT4 indicator name (e.g. EMA)")
+    parser.add_argument("trials", type=int, help="Number of Optuna trials")
+    args = parser.parse_args()
+
+    # for id1, id2 in itertools.product(range(4), range(7)):
+    # for id in range(7):
+    run_optimization(args.indicator_name, n_trials=args.trials)
     send_notification("Baseline optimization completed")
 
