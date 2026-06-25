@@ -1,42 +1,62 @@
 """Backtest a baseline indicator on a single currency pair."""
 
-import argparse
 import os
+from dataclasses import dataclass
 
 import backtrader as bt
 
-from tradeforge.backtest.algorithm import BaselineStrategy
+from tradeforge.backtest.algorithm import BaselineStrategy, BaselineC1Strategy, CrossType
 from tradeforge.backtest.bt_feed import make_bt_feed
 from tradeforge.config import Config
 from tradeforge.data.loader import load_indicator, load_static_data, merge_dataframes
 from tradeforge.data.request import request_indicator
-from tradeforge.utils.display import parse_number, print_header
+from tradeforge.utils.display import print_header
 
 
-def load_data(currency: str, baseline_name: str, parameters, trial: int):
-    cached_data = load_static_data([currency])
+@dataclass
+class IndicatorConfig:
+    name: str
+    parameters: list
+    buffer_values: list[int]
+    cross_type: CrossType 
+    cross_level: float = None
+    reverse: bool = False
 
+    @property
+    def num_buffers(self) -> int:
+        return len(self.buffer_values)
+
+    def strategy_kwargs(self, prefix: str) -> dict:
+        return {
+            f"{prefix}_col":         f"{prefix.upper()}_Buffer_0",
+            f"{prefix}_cross_type":  self.cross_type,
+            f"{prefix}_cross_level": self.cross_level,
+            f"{prefix}_reverse":     self.reverse,
+        }
+
+
+def _request_and_load(currency: str, config: IndicatorConfig, trial: int, label: str):
     if not request_indicator(
         [currency],
-        parameters=parameters,
-        indicator_name=baseline_name,
-        buffer_values=0,
+        parameters=config.parameters,
+        indicator_name=config.name,
+        buffer_values=config.buffer_values,
         trial_number=trial,
     ):
-        raise RuntimeError(f"Failed to request baseline '{baseline_name}' from MT4.")
+        raise RuntimeError(f"Failed to request {label} '{config.name}' from MT4.")
 
-    path = os.path.join(Config.COMMON_DIR, f"{currency}_{baseline_name}_1440_{trial}.csv")
+    path = os.path.join(Config.COMMON_DIR, f"{currency}_{config.name}_1440_{trial}.csv")
     if not os.path.exists(path):
-        raise FileNotFoundError(f"Missing baseline file: {path}")
+        raise FileNotFoundError(f"Missing {label} file: {path}")
 
-    baseline_df = load_indicator(path, num_buffers=1, indicator_name="Baseline")
-    return merge_dataframes(cached_data[currency], baseline_df)
+    return load_indicator(path, num_buffers=config.num_buffers, indicator_name=label)
 
 
 def run_backtest(
     currency: str,
-    baseline_name: str,
-    parameters,
+    baseline: IndicatorConfig,
+    c1: IndicatorConfig | None = None,
+    strategy=BaselineStrategy,
     trial: int = 0,
     initial_cash: float = 10_000.0,
     plot: bool = False,
@@ -44,9 +64,21 @@ def run_backtest(
     import pandas as pd
     import numpy as np
 
-    df = load_data(currency, baseline_name, parameters, trial)
+    cached_data = load_static_data([currency])
+    baseline_df = _request_and_load(currency, baseline, trial, label="Baseline")
+    dfs = [cached_data[currency], baseline_df]
 
-    # Data stats
+    indicator_cols = ["Baseline_Buffer_0", "ATR_Buffer_0"]
+    strategy_kwargs = {}
+
+    if c1:
+        c1_df = _request_and_load(currency, c1, trial, label="C1")
+        dfs.append(c1_df)
+        indicator_cols += [f"C1_Buffer_{i}" for i in c1.buffer_values]
+        strategy_kwargs.update(c1.strategy_kwargs("c1"))
+
+    df = merge_dataframes(*dfs)
+
     total = len(df)
     dates = pd.to_datetime(df["DateTime"], format="%Y.%m.%d %H:%M")
     col   = "Baseline_Buffer_0"
@@ -58,11 +90,11 @@ def run_backtest(
     print(f"[data]     rows={total}  range={dates.iloc[0].date()} -> {dates.iloc[-1].date()}")
     print(f"[baseline] valid={len(valid)}  crosses={crosses}")
 
-    feed = make_bt_feed(df, indicator_cols=["Baseline_Buffer_0", "ATR_Buffer_0"])
+    feed = make_bt_feed(df, indicator_cols=indicator_cols)
 
     cerebro = bt.Cerebro()
     cerebro.adddata(feed)
-    cerebro.addstrategy(BaselineStrategy)
+    cerebro.addstrategy(strategy, **strategy_kwargs)
     cerebro.broker.setcash(initial_cash)
     cerebro.broker.setcommission(margin=1/30, mult=1.0)
     cerebro.broker.set_coc(True)
@@ -83,7 +115,7 @@ def run_backtest(
 
     summary = {
         "currency":     currency,
-        "baseline":     baseline_name,
+        "baseline":     baseline.name,
         "initial_cash": initial_cash,
         "final_value":  final_value,
         "net_pnl":      final_value - initial_cash,
@@ -97,7 +129,7 @@ def run_backtest(
     }
 
     if plot:
-        cerebro.plot(style='bar')
+        cerebro.plot(style='candle')
 
     return summary
 
@@ -120,29 +152,21 @@ def print_summary(summary: dict):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Backtest a baseline indicator on one currency pair.",
-        epilog="Example: python -m scripts.run_backtest EURUSD_SB SineWMA 77 5",
+    # Phase 1 — baseline only
+    summary = run_backtest(
+        currency="EURUSD_SB",
+        baseline=IndicatorConfig(name="SineWMA", parameters=[77, 5], buffer_values=[0]),
+        strategy=BaselineStrategy,
+        plot=False,
     )
-    parser.add_argument("currency",      help="Currency pair (e.g. EURUSD_SB)")
-    parser.add_argument("baseline_name", help="Baseline indicator name")
-    parser.add_argument("parameters",    nargs="+", type=parse_number)
-    parser.add_argument("--trial", type=int,   default=0)
-    parser.add_argument("--cash",  type=float, default=10_000.0)
-    parser.add_argument("--plot",  action="store_true")
 
-    args = parser.parse_args()
+    # Phase 2 — baseline + C1
+    # summary = run_backtest(
+    #     currency="EURUSD_SB",
+    #     baseline=IndicatorConfig(name="SineWMA", parameters=[77, 5], buffer_values=[0]),
+    #     c1=IndicatorConfig(name="RSI", parameters=[14], buffer_values=[0], cross_type=CrossType.ZERO),
+    #     strategy=BaselineC1Strategy,
+    #     plot=False,
+    # )
 
-    try:
-        summary = run_backtest(
-            currency=args.currency,
-            baseline_name=args.baseline_name,
-            parameters=args.parameters,
-            trial=args.trial,
-            initial_cash=args.cash,
-            plot=args.plot,
-        )
-        print_summary(summary)
-    except (FileNotFoundError, RuntimeError) as e:
-        print(f"Error: {e}")
-        raise SystemExit(1)
+    print_summary(summary)
