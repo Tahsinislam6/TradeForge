@@ -1,19 +1,8 @@
 import math
-from enum import Enum
 
 import backtrader as bt
 
-
-class Signal(Enum):
-    LONG  =  1
-    SHORT = -1
-    NONE  =  0
-
-
-class CrossType(Enum):
-    PRICE    = "price"     # price vs indicator line
-    ZERO     = "zero"      # indicator line vs zero or other level
-    TWO_LINE = "two_line"  # fast line vs slow line
+from tradeforge.backtest.config import Signal, Indicator
 
 
 class _BaselinePlot(bt.Indicator):
@@ -25,66 +14,27 @@ class _BaselinePlot(bt.Indicator):
         self.lines.baseline = self.data
 
 
-# Base strategy — shared guards, sizing, and execution logic
-
 class NNFXBaseStrategy(bt.Strategy):
 
     SL_MULTIPLIER = 1.5
     RISK_PCT = 0.02
 
     params = dict(
-        baseline_col="Baseline_Buffer_0",
+        baseline=None,
         atr_col="ATR_Buffer_0",
     )
 
     def __init__(self):
-        self.baseline = getattr(self.data.lines, self.p.baseline_col)
+        self.p.baseline.setup(self)
         self.atr = getattr(self.data.lines, self.p.atr_col)
-        _BaselinePlot(self.baseline)
+        _BaselinePlot(self.p.baseline.line)
+        self._indicators: list[Indicator] = [self.p.baseline]
 
-    def _get_signals(self) -> list[Signal]:
-        raise NotImplementedError
+    def _any_trigger(self) -> bool:
+        return any(ind.crossed() for ind in self._indicators)
 
-    # CrossOver factories — use in subclass __init__ to wire up indicators.
-    # CrossOver(a, b) outputs: 1.0 when a crosses above b (→ LONG), -1.0 when a crosses below b (→ SHORT), 0.0 otherwise.
-    def _price_cross(self, line):
-        # close crosses above/below indicator line
-        return bt.indicators.CrossOver(self.data.close, line)
-
-    @staticmethod
-    def _zero_cross(line, level: float = 0.0):
-        # indicator line crosses above/below a fixed level (default 0)
-        return bt.indicators.CrossOver(line, level)
-
-    @staticmethod
-    def _two_line_cross(fast, slow):
-        # fast line crosses above/below slow line
-        return bt.indicators.CrossOver(fast, slow)
-
-    def _make_cross(self, cross_type: CrossType, fast, slow=None):
-        if cross_type == CrossType.PRICE:
-            return self._price_cross(fast)
-        if cross_type == CrossType.ZERO:
-            return self._zero_cross(fast)
-        if cross_type == CrossType.TWO_LINE:
-            return self._two_line_cross(fast, slow)
-        raise ValueError(f"Unknown CrossType: {cross_type}")
-
-    @staticmethod
-    def _read_cross(cross) -> Signal:
-        if cross[0] > 0:
-            return Signal.LONG
-        if cross[0] < 0:
-            return Signal.SHORT
-        return Signal.NONE
-
-    @staticmethod
-    def _reverse(signal: Signal) -> Signal:
-        if signal == Signal.LONG:
-            return Signal.SHORT
-        if signal == Signal.SHORT:
-            return Signal.LONG
-        return Signal.NONE
+    def _get_directions(self) -> list[Signal]:
+        return [ind.direction() for ind in self._indicators]
 
     def _calculate_order_details(self, long: bool):
         equity = self.broker.getvalue()
@@ -101,74 +51,47 @@ class NNFXBaseStrategy(bt.Strategy):
         return tp, sl, size
 
     def next(self):
-        if self.baseline[0] != self.baseline[0] or self.baseline[0] == 0:
+        line_val = self.p.baseline.line[0]
+        if line_val != line_val or line_val == 0:
             return
         if self.atr[0] != self.atr[0] or self.atr[0] == 0:
             return
 
-        signals = self._get_signals()
+        if not self._any_trigger():
+            return
 
-        if all(s == Signal.LONG for s in signals):
+        directions = self._get_directions()
+
+        if all(s == Signal.LONG for s in directions):
             if self.position.size < 0:
                 self.close()
-            tp, sl, size = self._calculate_order_details(long=True)
-            if size > 0:
-                self.buy_bracket(size=size, stopprice=sl, limitprice=tp)
+            if not self.position:
+                tp, sl, size = self._calculate_order_details(long=True)
+                if size > 0:
+                    self.buy_bracket(size=size, stopprice=sl, limitprice=tp)
 
-        elif all(s == Signal.SHORT for s in signals):
+        elif all(s == Signal.SHORT for s in directions):
             if self.position.size > 0:
                 self.close()
-            tp, sl, size = self._calculate_order_details(long=False)
-            if size > 0:
-                self.sell_bracket(size=size, stopprice=sl, limitprice=tp)
+            if not self.position:
+                tp, sl, size = self._calculate_order_details(long=False)
+                if size > 0:
+                    self.sell_bracket(size=size, stopprice=sl, limitprice=tp)
 
 
 # Phase 1 — Baseline only
 
 class BaselineStrategy(NNFXBaseStrategy):
-
-    def __init__(self):
-        super().__init__()
-        self.cross = self._price_cross(self.baseline)
-
-    def _baseline_signal(self) -> Signal:
-        return self._read_cross(self.cross)
-
-    def _get_signals(self) -> list[Signal]:
-        return [self._baseline_signal()]
+    pass
 
 
 # Phase 2 — Baseline + C1
 
 class BaselineC1Strategy(NNFXBaseStrategy):
 
-    params = NNFXBaseStrategy.params | dict(
-        c1_col="C1_Buffer_0",
-        c1_slow_col="C1_Buffer_1",
-        c1_cross_type=CrossType.ZERO,
-        c1_cross_level=0.0,
-        c1_reverse=False,
-    )
+    params = dict(c1=None)
 
     def __init__(self):
         super().__init__()
-        self.cross = self._price_cross(self.baseline)
-
-        self.c1 = getattr(self.data.lines, self.p.c1_col)
-        if self.p.c1_cross_type == CrossType.PRICE:
-            self.c1_cross = self._price_cross(self.c1)
-        elif self.p.c1_cross_type == CrossType.ZERO:
-            self.c1_cross = self._zero_cross(self.c1, self.p.c1_cross_level)
-        elif self.p.c1_cross_type == CrossType.TWO_LINE:
-            c1_slow = getattr(self.data.lines, self.p.c1_slow_col)
-            self.c1_cross = self._two_line_cross(self.c1, c1_slow)
-
-    def _baseline_signal(self) -> Signal:
-        return self._read_cross(self.cross)
-
-    def _c1_signal(self) -> Signal:
-        signal = self._read_cross(self.c1_cross)
-        return self._reverse(signal) if self.p.c1_reverse else signal
-
-    def _get_signals(self) -> list[Signal]:
-        return [self._baseline_signal(), self._c1_signal()]
+        self.p.c1.setup(self)
+        self._indicators.append(self.p.c1)

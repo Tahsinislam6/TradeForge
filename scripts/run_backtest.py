@@ -1,11 +1,11 @@
 """Backtest a baseline indicator on a single currency pair."""
 
 import os
-from dataclasses import dataclass
 
 import backtrader as bt
 
-from tradeforge.backtest.algorithm import BaselineStrategy, BaselineC1Strategy, CrossType
+from tradeforge.backtest.algorithm import BaselineStrategy, BaselineC1Strategy
+from tradeforge.backtest.config import Indicator, PriceCrossIndicator, TwoLineCrossIndicator
 from tradeforge.backtest.bt_feed import make_bt_feed
 from tradeforge.config import Config
 from tradeforge.data.loader import load_indicator, load_static_data, merge_dataframes
@@ -13,49 +13,27 @@ from tradeforge.data.request import request_indicator
 from tradeforge.utils.display import print_header
 
 
-@dataclass
-class IndicatorConfig:
-    name: str
-    parameters: list
-    buffer_values: list[int]
-    cross_type: CrossType 
-    cross_level: float = None
-    reverse: bool = False
-
-    @property
-    def num_buffers(self) -> int:
-        return len(self.buffer_values)
-
-    def strategy_kwargs(self, prefix: str) -> dict:
-        return {
-            f"{prefix}_col":         f"{prefix.upper()}_Buffer_0",
-            f"{prefix}_cross_type":  self.cross_type,
-            f"{prefix}_cross_level": self.cross_level,
-            f"{prefix}_reverse":     self.reverse,
-        }
-
-
-def _request_and_load(currency: str, config: IndicatorConfig, trial: int, label: str):
+def _request_and_load(currency: str, indicator: Indicator, trial: int):
     if not request_indicator(
         [currency],
-        parameters=config.parameters,
-        indicator_name=config.name,
-        buffer_values=config.buffer_values,
+        parameters=indicator.parameters,
+        indicator_name=indicator.name,
+        buffer_values=indicator.buffer_values,
         trial_number=trial,
     ):
-        raise RuntimeError(f"Failed to request {label} '{config.name}' from MT4.")
+        raise RuntimeError(f"Failed to request '{indicator.name}' from MT4.")
 
-    path = os.path.join(Config.COMMON_DIR, f"{currency}_{config.name}_1440_{trial}.csv")
+    path = os.path.join(Config.COMMON_DIR, f"{currency}_{indicator.name}_1440_{trial}.csv")
     if not os.path.exists(path):
-        raise FileNotFoundError(f"Missing {label} file: {path}")
+        raise FileNotFoundError(f"Missing file: {path}")
 
-    return load_indicator(path, num_buffers=config.num_buffers, indicator_name=label)
+    return load_indicator(path, num_buffers=indicator.num_buffers, indicator_name=indicator.label)
 
 
 def run_backtest(
     currency: str,
-    baseline: IndicatorConfig,
-    c1: IndicatorConfig | None = None,
+    baseline: Indicator,
+    c1: Indicator | None = None,
     strategy=BaselineStrategy,
     trial: int = 0,
     initial_cash: float = 10_000.0,
@@ -65,17 +43,17 @@ def run_backtest(
     import numpy as np
 
     cached_data = load_static_data([currency])
-    baseline_df = _request_and_load(currency, baseline, trial, label="Baseline")
+    baseline_df = _request_and_load(currency, baseline, trial)
     dfs = [cached_data[currency], baseline_df]
 
-    indicator_cols = ["Baseline_Buffer_0", "ATR_Buffer_0"]
-    strategy_kwargs = {}
+    indicator_cols = baseline.col_names + ["ATR_Buffer_0"]
+    strategy_kwargs = {"baseline": baseline}
 
     if c1:
-        c1_df = _request_and_load(currency, c1, trial, label="C1")
+        c1_df = _request_and_load(currency, c1, trial)
         dfs.append(c1_df)
-        indicator_cols += [f"C1_Buffer_{i}" for i in c1.buffer_values]
-        strategy_kwargs.update(c1.strategy_kwargs("c1"))
+        indicator_cols += c1.col_names
+        strategy_kwargs["c1"] = c1
 
     df = merge_dataframes(*dfs)
 
@@ -153,20 +131,20 @@ def print_summary(summary: dict):
 
 if __name__ == "__main__":
     # Phase 1 — baseline only
-    summary = run_backtest(
-        currency="EURUSD_SB",
-        baseline=IndicatorConfig(name="SineWMA", parameters=[77, 5], buffer_values=[0]),
-        strategy=BaselineStrategy,
-        plot=False,
-    )
-
-    # Phase 2 — baseline + C1
     # summary = run_backtest(
     #     currency="EURUSD_SB",
-    #     baseline=IndicatorConfig(name="SineWMA", parameters=[77, 5], buffer_values=[0]),
-    #     c1=IndicatorConfig(name="RSI", parameters=[14], buffer_values=[0], cross_type=CrossType.ZERO),
-    #     strategy=BaselineC1Strategy,
+    #     baseline=PriceCrossIndicator(name="SineWMA", parameters=[77, 5], buffer_values=[0], label="Baseline"),
+    #     strategy=BaselineStrategy,
     #     plot=False,
     # )
+
+    # Phase 2 — baseline + C1
+    summary = run_backtest(
+        currency="EURUSD_SB",
+        baseline=PriceCrossIndicator(name="SineWMA", parameters=[77, 5], buffer_values=[0], label="Baseline"),
+        c1=TwoLineCrossIndicator(name="trading-oscillator", parameters=[95, 10, 10], buffer_values=[1, 2], label="C1"),
+        strategy=BaselineC1Strategy,
+        plot=False,
+    )
 
     print_summary(summary)
