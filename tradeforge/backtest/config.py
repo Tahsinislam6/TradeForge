@@ -54,13 +54,52 @@ class Indicator(ABC):
         return Signal.SHORT if signal == Signal.LONG else Signal.LONG
 
 
+class _BaselinePlot(bt.Indicator):
+    lines = ('baseline',)
+    plotinfo  = dict(subplot=False)
+    plotlines = dict(baseline=dict(_name='Baseline', color='orange', linewidth=1.5))
+
+    def __init__(self):
+        self.lines.baseline = self.data
+
+
+
+class _LineCrossPlot(bt.Indicator):
+    lines = ('signal', 'level')
+    params = (('cross_level', 0.0),)
+    plotinfo  = dict(subplot=True)
+    plotlines = dict(
+        signal=dict(_name='Signal', color='blue',  linewidth=1.5),
+        level =dict(_name='Level',  color='gray',  linewidth=1.0, ls='--'),
+    )
+
+    def __init__(self):
+        self.lines.signal = self.data + 0.0
+        self.lines.level  = self.data - self.data + self.p.cross_level
+
+
+class _TwoLinePlot(bt.Indicator):
+    lines = ('fast', 'slow')
+    plotinfo  = dict(subplot=True)
+    plotlines = dict(
+        fast=dict(_name='Fast', color='blue',   linewidth=1.5),
+        slow=dict(_name='Slow', color='orange', linewidth=1.5),
+    )
+
+    def __init__(self):
+        self.lines.fast = self.data + 0.0
+        self.lines.slow = self.data1 + 0.0
+
+
 class PriceCrossIndicator(Indicator):
     """Close price crosses above/below the indicator line."""
 
     def setup(self, strategy) -> None:
         self._line = getattr(strategy.data.lines, f"{self.label}_Buffer_0")
         self._cross = bt.indicators.CrossOver(strategy.data.close, self._line)
+        self._cross.plotinfo.plot = False
         self._close = strategy.data.close
+        _BaselinePlot(self._line)
 
     @property
     def line(self):
@@ -77,8 +116,8 @@ class PriceCrossIndicator(Indicator):
         return Signal.NONE
 
 
-class ZeroCrossIndicator(Indicator):
-    """Indicator line crosses above/below a fixed level."""
+class LineCrossIndicator(Indicator):
+    """Indicator line crosses above/below a configurable level."""
 
     def __init__(self, *args, cross_level: float = 0.0, **kwargs):
         super().__init__(*args, **kwargs)
@@ -87,6 +126,8 @@ class ZeroCrossIndicator(Indicator):
     def setup(self, strategy) -> None:
         self._line = getattr(strategy.data.lines, f"{self.label}_Buffer_0")
         self._cross = bt.indicators.CrossOver(self._line, self.cross_level)
+        self._cross.plotinfo.plot = False
+        _LineCrossPlot(self._line, cross_level=self.cross_level)
 
     @property
     def line(self):
@@ -110,6 +151,8 @@ class TwoLineCrossIndicator(Indicator):
         self._fast = getattr(strategy.data.lines, f"{self.label}_Buffer_0")
         self._slow = getattr(strategy.data.lines, f"{self.label}_Buffer_1")
         self._cross = bt.indicators.CrossOver(self._fast, self._slow)
+        self._cross.plotinfo.plot = False
+        _TwoLinePlot(self._fast, self._slow)
 
     @property
     def line(self):

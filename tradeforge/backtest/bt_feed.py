@@ -33,6 +33,7 @@ def make_bt_feed(df: pd.DataFrame, indicator_cols: list[str] | None = None):
         {
             "lines": tuple(indicator_cols),
             "params": tuple((col, col) for col in indicator_cols),
+            "plotlines": {col: dict(_plotskip=True) for col in indicator_cols},
         },
     )
     return feed_cls(dataname=df, **base_params)

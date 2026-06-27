@@ -5,15 +5,6 @@ import backtrader as bt
 from tradeforge.backtest.config import Signal, Indicator
 
 
-class _BaselinePlot(bt.Indicator):
-    lines = ('baseline',)
-    plotinfo  = dict(subplot=False)
-    plotlines = dict(baseline=dict(_name='Baseline', color='orange', linewidth=1.5))
-
-    def __init__(self):
-        self.lines.baseline = self.data
-
-
 class NNFXBaseStrategy(bt.Strategy):
 
     SL_MULTIPLIER = 1.5
@@ -27,7 +18,6 @@ class NNFXBaseStrategy(bt.Strategy):
     def __init__(self):
         self.p.baseline.setup(self)
         self.atr = getattr(self.data.lines, self.p.atr_col)
-        _BaselinePlot(self.p.baseline.line)
         self._indicators: list[Indicator] = [self.p.baseline]
 
     def _any_trigger(self) -> bool:
@@ -49,6 +39,17 @@ class NNFXBaseStrategy(bt.Strategy):
             tp = price - self.atr[0]
             sl = price + sl_distance
         return tp, sl, size
+
+    def notify_trade(self, trade):
+        if not trade.isclosed:
+            return
+        direction = "LONG" if trade.long else "SHORT"
+        open_dt  = bt.num2date(trade.dtopen).strftime("%Y-%m-%d")
+        close_dt = bt.num2date(trade.dtclose).strftime("%Y-%m-%d")
+        print(
+            f"[trade] {direction:5s}  open={open_dt}  close={close_dt}"
+            f"  pnl={trade.pnlcomm:+.2f}"
+        )
 
     def next(self):
         line_val = self.p.baseline.line[0]
@@ -81,13 +82,13 @@ class NNFXBaseStrategy(bt.Strategy):
 
 # Phase 1 — Baseline only
 
-class BaselineStrategy(NNFXBaseStrategy):
+class Phase1Strategy(NNFXBaseStrategy):
     pass
 
 
 # Phase 2 — Baseline + C1
 
-class BaselineC1Strategy(NNFXBaseStrategy):
+class Phase2Strategy(NNFXBaseStrategy):
 
     params = dict(c1=None)
 

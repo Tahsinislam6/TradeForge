@@ -4,8 +4,8 @@ import os
 
 import backtrader as bt
 
-from tradeforge.backtest.algorithm import BaselineStrategy, BaselineC1Strategy
-from tradeforge.backtest.config import Indicator, PriceCrossIndicator, TwoLineCrossIndicator
+from tradeforge.backtest.algorithm import Phase1Strategy, Phase2Strategy
+from tradeforge.backtest.config import *
 from tradeforge.backtest.bt_feed import make_bt_feed
 from tradeforge.config import Config
 from tradeforge.data.loader import load_indicator, load_static_data, merge_dataframes
@@ -34,7 +34,7 @@ def run_backtest(
     currency: str,
     baseline: Indicator,
     c1: Indicator | None = None,
-    strategy=BaselineStrategy,
+    strategy=Phase1Strategy,
     trial: int = 0,
     initial_cash: float = 10_000.0,
     plot: bool = False,
@@ -59,14 +59,7 @@ def run_backtest(
 
     total = len(df)
     dates = pd.to_datetime(df["DateTime"], format="%Y.%m.%d %H:%M")
-    col   = "Baseline_Buffer_0"
-    valid = df[col].replace(0, np.nan).dropna()
-    crosses = int((
-        (df["Close"] > df[col].replace(0, np.nan))
-        .astype(float).diff().abs() > 0
-    ).sum()) if len(valid) > 1 else 0
     print(f"[data]     rows={total}  range={dates.iloc[0].date()} -> {dates.iloc[-1].date()}")
-    print(f"[baseline] valid={len(valid)}  crosses={crosses}")
 
     feed = make_bt_feed(df, indicator_cols=indicator_cols)
 
@@ -134,7 +127,7 @@ if __name__ == "__main__":
     # summary = run_backtest(
     #     currency="EURUSD_SB",
     #     baseline=PriceCrossIndicator(name="SineWMA", parameters=[77, 5], buffer_values=[0], label="Baseline"),
-    #     strategy=BaselineStrategy,
+    #     strategy=Phase1Strategy,
     #     plot=False,
     # )
 
@@ -142,9 +135,9 @@ if __name__ == "__main__":
     summary = run_backtest(
         currency="EURUSD_SB",
         baseline=PriceCrossIndicator(name="SineWMA", parameters=[77, 5], buffer_values=[0], label="Baseline"),
-        c1=TwoLineCrossIndicator(name="trading-oscillator", parameters=[95, 10, 10], buffer_values=[1, 2], label="C1"),
-        strategy=BaselineC1Strategy,
-        plot=False,
+        c1=LineCrossIndicator(name="ZeroLag_MACD", parameters=[80, 40, 43], buffer_values=[1], label="C1", reverse=True),
+        strategy=Phase2Strategy,
+        plot=True,
     )
 
     print_summary(summary)
