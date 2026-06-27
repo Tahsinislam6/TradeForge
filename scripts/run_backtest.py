@@ -68,7 +68,7 @@ def run_backtest(
     cerebro.addstrategy(strategy, **strategy_kwargs)
     cerebro.broker.setcash(initial_cash)
     cerebro.broker.setcommission(margin=1/30, mult=1.0)
-    cerebro.broker.set_coc(True)
+
 
     cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name="trades")
     cerebro.addanalyzer(bt.analyzers.Returns,       _name="returns")

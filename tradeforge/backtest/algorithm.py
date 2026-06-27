@@ -19,6 +19,7 @@ class NNFXBaseStrategy(bt.Strategy):
         self.p.baseline.setup(self)
         self.atr = getattr(self.data.lines, self.p.atr_col)
         self._indicators: list[Indicator] = [self.p.baseline]
+        self._bracket_orders = []
 
     def _any_trigger(self) -> bool:
         return any(ind.crossed() for ind in self._indicators)
@@ -39,6 +40,12 @@ class NNFXBaseStrategy(bt.Strategy):
             tp = price - self.atr[0]
             sl = price + sl_distance
         return tp, sl, size
+
+    def _cancel_bracket(self):
+        for o in self._bracket_orders:
+            if o.alive():
+                self.cancel(o)
+        self._bracket_orders = []
 
     def notify_trade(self, trade):
         if not trade.isclosed:
@@ -65,19 +72,21 @@ class NNFXBaseStrategy(bt.Strategy):
 
         if all(s == Signal.LONG for s in directions):
             if self.position.size < 0:
+                self._cancel_bracket()
                 self.close()
             if not self.position:
                 tp, sl, size = self._calculate_order_details(long=True)
                 if size > 0:
-                    self.buy_bracket(size=size, stopprice=sl, limitprice=tp)
+                    self._bracket_orders = self.buy_bracket(size=size, stopprice=sl, limitprice=tp)
 
         elif all(s == Signal.SHORT for s in directions):
             if self.position.size > 0:
+                self._cancel_bracket()
                 self.close()
             if not self.position:
                 tp, sl, size = self._calculate_order_details(long=False)
                 if size > 0:
-                    self.sell_bracket(size=size, stopprice=sl, limitprice=tp)
+                    self._bracket_orders = self.sell_bracket(size=size, stopprice=sl, limitprice=tp)
 
 
 # Phase 1 — Baseline only
