@@ -88,6 +88,8 @@ def run_backtest(
     total_trades = trades.get("total", {}).get("total", 0)
     won          = trades.get("won",   {}).get("total", 0)
     lost         = trades.get("lost",  {}).get("total", 0)
+    gross_profit = trades.get("won",  {}).get("pnl", {}).get("total", 0.0)
+    gross_loss   = trades.get("lost", {}).get("pnl", {}).get("total", 0.0)
 
     summary = {
         "currency":     currency,
@@ -102,6 +104,7 @@ def run_backtest(
         "won":          won,
         "lost":         lost,
         "win_rate":     (won / total_trades * 100) if total_trades else 0.0,
+        "profit_factor": (gross_profit / abs(gross_loss)) if gross_loss else float("inf") if gross_profit else 0.0,
     }
 
     if plot:
@@ -124,6 +127,8 @@ def print_summary(summary: dict):
     print()
     print(f"  Trades    : {summary['total_trades']}  (W {summary['won']} / L {summary['lost']})")
     print(f"  Win Rate  : {summary['win_rate']:.1f}%")
+    pf = summary["profit_factor"]
+    print(f"  PF        : {pf:.2f}" if pf != float("inf") else "  PF        : inf")
     print()
 
 
