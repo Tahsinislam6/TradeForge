@@ -27,25 +27,31 @@ class Indicator(ABC):
     def col_names(self) -> list[str]:
         return [f"{self.label}_Buffer_{i}" for i in range(self.num_buffers)]
 
-    @property
     @abstractmethod
-    def line(self):
-        """Primary data line — used for plotting and validity checks."""
+    def line(self, data):
+        """Primary data line for the given data feed — plotting/validity checks."""
         ...
 
     @abstractmethod
-    def setup(self, strategy) -> None:
-        """Wire up bt indicators. Must be called inside strategy __init__."""
+    def setup(self, strategy, data) -> None:
+        """Wire up bt indicators against a specific data feed. Must be called
+        once per data feed inside strategy __init__."""
+        ...
+
+    def reset(self) -> None:
+        """Drop all per-data bindings from previous strategy runs. Call once
+        before re-using an Indicator instance across separate backtests (the
+        instance may be a long-lived singleton, e.g. shared across many
+        Optuna trials), so stale bindings don't leak memory."""
+
+    @abstractmethod
+    def crossed(self, data) -> bool:
+        """True if a crossover occurred on the current bar for this data feed."""
         ...
 
     @abstractmethod
-    def crossed(self) -> bool:
-        """True if a crossover occurred on the current bar."""
-        ...
-
-    @abstractmethod
-    def direction(self) -> Signal:
-        """Current direction state (not just on-cross bars)."""
+    def direction(self, data) -> Signal:
+        """Current direction state for this data feed (not just on-cross bars)."""
         ...
 
     def _maybe_reverse(self, signal: Signal) -> Signal:
@@ -94,24 +100,39 @@ class _TwoLinePlot(bt.Indicator):
 class PriceCrossIndicator(Indicator):
     """Close price crosses above/below the indicator line."""
 
-    def setup(self, strategy) -> None:
-        self._line = getattr(strategy.data.lines, f"{self.label}_Buffer_0")
-        self._cross = bt.indicators.CrossOver(strategy.data.close, self._line)
-        self._cross.plotinfo.plot = False
-        self._close = strategy.data.close
-        _BaselinePlot(self._line)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._line = {}
+        self._cross = {}
+        self._close = {}
 
-    @property
-    def line(self):
-        return self._line
+    def setup(self, strategy, data) -> None:
+        key = id(data)
+        line = getattr(data.lines, f"{self.label}_Buffer_0")
+        cross = bt.indicators.CrossOver(data.close, line)
+        cross.plotinfo.plot = False
+        self._line[key] = line
+        self._cross[key] = cross
+        self._close[key] = data.close
+        _BaselinePlot(line)
 
-    def crossed(self) -> bool:
-        return self._cross[0] != 0
+    def reset(self) -> None:
+        self._line.clear()
+        self._cross.clear()
+        self._close.clear()
 
-    def direction(self) -> Signal:
-        if self._close[0] > self._line[0]:
+    def line(self, data):
+        return self._line[id(data)]
+
+    def crossed(self, data) -> bool:
+        return self._cross[id(data)][0] != 0
+
+    def direction(self, data) -> Signal:
+        close = self._close[id(data)]
+        line = self._line[id(data)]
+        if close[0] > line[0]:
             return self._maybe_reverse(Signal.LONG)
-        if self._close[0] < self._line[0]:
+        if close[0] < line[0]:
             return self._maybe_reverse(Signal.SHORT)
         return Signal.NONE
 
@@ -122,24 +143,33 @@ class LineCrossIndicator(Indicator):
     def __init__(self, *args, cross_level: float = 0.0, **kwargs):
         super().__init__(*args, **kwargs)
         self.cross_level = cross_level
+        self._line = {}
+        self._cross = {}
 
-    def setup(self, strategy) -> None:
-        self._line = getattr(strategy.data.lines, f"{self.label}_Buffer_0")
-        self._cross = bt.indicators.CrossOver(self._line, self.cross_level)
-        self._cross.plotinfo.plot = False
-        _LineCrossPlot(self._line, cross_level=self.cross_level)
+    def setup(self, strategy, data) -> None:
+        key = id(data)
+        line = getattr(data.lines, f"{self.label}_Buffer_0")
+        cross = bt.indicators.CrossOver(line, self.cross_level)
+        cross.plotinfo.plot = False
+        self._line[key] = line
+        self._cross[key] = cross
+        _LineCrossPlot(line, cross_level=self.cross_level)
 
-    @property
-    def line(self):
-        return self._line
+    def reset(self) -> None:
+        self._line.clear()
+        self._cross.clear()
 
-    def crossed(self) -> bool:
-        return self._cross[0] != 0
+    def line(self, data):
+        return self._line[id(data)]
 
-    def direction(self) -> Signal:
-        if self._line[0] > self.cross_level:
+    def crossed(self, data) -> bool:
+        return self._cross[id(data)][0] != 0
+
+    def direction(self, data) -> Signal:
+        line = self._line[id(data)]
+        if line[0] > self.cross_level:
             return self._maybe_reverse(Signal.LONG)
-        if self._line[0] < self.cross_level:
+        if line[0] < self.cross_level:
             return self._maybe_reverse(Signal.SHORT)
         return Signal.NONE
 
@@ -147,23 +177,39 @@ class LineCrossIndicator(Indicator):
 class TwoLineCrossIndicator(Indicator):
     """Fast line crosses above/below slow line."""
 
-    def setup(self, strategy) -> None:
-        self._fast = getattr(strategy.data.lines, f"{self.label}_Buffer_0")
-        self._slow = getattr(strategy.data.lines, f"{self.label}_Buffer_1")
-        self._cross = bt.indicators.CrossOver(self._fast, self._slow)
-        self._cross.plotinfo.plot = False
-        _TwoLinePlot(self._fast, self._slow)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._fast = {}
+        self._slow = {}
+        self._cross = {}
 
-    @property
-    def line(self):
-        return self._fast
+    def setup(self, strategy, data) -> None:
+        key = id(data)
+        fast = getattr(data.lines, f"{self.label}_Buffer_0")
+        slow = getattr(data.lines, f"{self.label}_Buffer_1")
+        cross = bt.indicators.CrossOver(fast, slow)
+        cross.plotinfo.plot = False
+        self._fast[key] = fast
+        self._slow[key] = slow
+        self._cross[key] = cross
+        _TwoLinePlot(fast, slow)
 
-    def crossed(self) -> bool:
-        return self._cross[0] != 0
+    def reset(self) -> None:
+        self._fast.clear()
+        self._slow.clear()
+        self._cross.clear()
 
-    def direction(self) -> Signal:
-        if self._fast[0] > self._slow[0]:
+    def line(self, data):
+        return self._fast[id(data)]
+
+    def crossed(self, data) -> bool:
+        return self._cross[id(data)][0] != 0
+
+    def direction(self, data) -> Signal:
+        fast = self._fast[id(data)]
+        slow = self._slow[id(data)]
+        if fast[0] > slow[0]:
             return self._maybe_reverse(Signal.LONG)
-        if self._fast[0] < self._slow[0]:
+        if fast[0] < slow[0]:
             return self._maybe_reverse(Signal.SHORT)
         return Signal.NONE

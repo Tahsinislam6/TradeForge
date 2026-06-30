@@ -31,6 +31,27 @@ def _request_and_load(currency: str, indicator: Indicator, trial: int):
     return load_indicator(path, num_buffers=indicator.num_buffers, indicator_name=indicator.label)
 
 
+def _request_and_load_many(currencies: list[str], indicator: Indicator, trial: int):
+    """Batch-request one indicator for multiple currencies in a single MT4
+    call, then load each currency's resulting CSV."""
+    if not request_indicator(
+        currencies,
+        parameters=indicator.parameters,
+        indicator_name=indicator.name,
+        buffer_values=indicator.buffer_values,
+        trial_number=trial,
+    ):
+        raise RuntimeError(f"Failed to request '{indicator.name}' from MT4.")
+
+    result = {}
+    for currency in currencies:
+        path = os.path.join(Config.COMMON_DIR, f"{currency}_{indicator.name}_1440_{trial}.csv")
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Missing file: {path}")
+        result[currency] = load_indicator(path, num_buffers=indicator.num_buffers, indicator_name=indicator.label)
+    return result
+
+
 def run_backtest(
     currency: str,
     baseline: Indicator,
@@ -65,7 +86,7 @@ def run_backtest(
     feed = make_bt_feed(df, indicator_cols=indicator_cols)
 
     cerebro = bt.Cerebro()
-    cerebro.adddata(feed)
+    cerebro.adddata(feed, name=currency)
     cerebro.addstrategy(strategy, **strategy_kwargs)
     cerebro.broker.setcash(initial_cash)
     cerebro.broker.setcommission(margin=1/30, mult=1.0)
@@ -114,8 +135,12 @@ def run_backtest(
 
 
 def print_summary(summary: dict):
-    print_header("BACKTEST RESULTS")
-    print(f"  Currency  : {summary['currency']}")
+    if "currencies" in summary:
+        print_header("PORTFOLIO BACKTEST RESULTS")
+        print(f"  Currencies: {', '.join(summary['currencies'])}")
+    else:
+        print_header("BACKTEST RESULTS")
+        print(f"  Currency  : {summary['currency']}")
     print(f"  Baseline  : {summary['baseline']}")
     print()
     print(f"  Initial   : ${summary['initial_cash']:,.2f}")
@@ -132,6 +157,91 @@ def print_summary(summary: dict):
     print()
 
 
+def run_portfolio_backtest(
+    currencies: list[str],
+    baseline: Indicator,
+    c1: Indicator | None = None,
+    strategy=Phase1Strategy,
+    trial: int = 0,
+    initial_cash: float = 10_000.0,
+    plot: bool = False,
+) -> dict:
+    """Backtest a baseline (+ optional C1) strategy across multiple currency
+    pairs in a single Cerebro run, sharing one portfolio equity/risk budget."""
+    import pandas as pd
+
+    cached_data = load_static_data(currencies)
+    baseline_dfs = _request_and_load_many(currencies, baseline, trial)
+
+    indicator_cols = baseline.col_names + ["ATR_Buffer_0"]
+    strategy_kwargs = {"baseline": baseline}
+
+    c1_dfs = {}
+    if c1:
+        c1_dfs = _request_and_load_many(currencies, c1, trial)
+        indicator_cols += c1.col_names
+        strategy_kwargs["c1"] = c1
+
+    cerebro = bt.Cerebro()
+    for currency in currencies:
+        dfs = [cached_data[currency], baseline_dfs[currency]]
+        if c1:
+            dfs.append(c1_dfs[currency])
+        df = merge_dataframes(*dfs)
+
+        total = len(df)
+        dates = pd.to_datetime(df["DateTime"], format="%Y.%m.%d %H:%M")
+        print(f"[data]     {currency}  rows={total}  range={dates.iloc[0].date()} -> {dates.iloc[-1].date()}")
+
+        feed = make_bt_feed(df, indicator_cols=indicator_cols)
+        cerebro.adddata(feed, name=currency)
+
+    cerebro.addstrategy(strategy, **strategy_kwargs)
+    cerebro.broker.setcash(initial_cash)
+    cerebro.broker.setcommission(margin=1/30, mult=1.0)
+
+    cerebro.addobserver(bt.observers.Broker)
+    if plot:
+        cerebro.addanalyzer(TradeLogger, _name="trade_log")
+
+    cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name="trades")
+    cerebro.addanalyzer(bt.analyzers.Returns,       _name="returns")
+    cerebro.addanalyzer(bt.analyzers.DrawDown,       _name="drawdown")
+    cerebro.addanalyzer(bt.analyzers.SharpeRatio,   _name="sharpe", riskfreerate=0.0)
+
+    results     = cerebro.run(stdstats=False)
+    strat       = results[0]
+    final_value = cerebro.broker.getvalue()
+
+    trades       = strat.analyzers.trades.get_analysis()
+    total_trades = trades.get("total", {}).get("total", 0)
+    won          = trades.get("won",   {}).get("total", 0)
+    lost         = trades.get("lost",  {}).get("total", 0)
+    gross_profit = trades.get("won",  {}).get("pnl", {}).get("total", 0.0)
+    gross_loss   = trades.get("lost", {}).get("pnl", {}).get("total", 0.0)
+
+    summary = {
+        "currencies":   currencies,
+        "baseline":     baseline.name,
+        "initial_cash": initial_cash,
+        "final_value":  final_value,
+        "net_pnl":      final_value - initial_cash,
+        "return_pct":   strat.analyzers.returns.get_analysis().get("rtot", 0.0) * 100,
+        "sharpe":       strat.analyzers.sharpe.get_analysis().get("sharperatio"),
+        "max_drawdown": strat.analyzers.drawdown.get_analysis().get("max", {}).get("drawdown", 0.0),
+        "total_trades": total_trades,
+        "won":          won,
+        "lost":         lost,
+        "win_rate":     (won / total_trades * 100) if total_trades else 0.0,
+        "profit_factor": (gross_profit / abs(gross_loss)) if gross_loss else float("inf") if gross_profit else 0.0,
+    }
+
+    if plot:
+        cerebro.plot(style='candle', volume=False)
+
+    return summary
+
+
 if __name__ == "__main__":
     # Phase 1 — baseline only
     # summary = run_backtest(
@@ -142,6 +252,7 @@ if __name__ == "__main__":
     # )
 
     # Phase 2 — baseline + C1
+    """
     summary = run_backtest(
         currency="EURUSD_SB",
         baseline=PriceCrossIndicator(name="SineWMA", parameters=[77, 5], buffer_values=[0], label="Baseline"),
@@ -149,5 +260,15 @@ if __name__ == "__main__":
         strategy=Phase2Strategy,
         plot=True,
     )
-
+    print_summary(summary)
+    """
+    
+    # Phase 2 — portfolio backtest with multiple currencies
+    summary = run_portfolio_backtest(
+        currencies=Config.CURRENCIES,
+        baseline=PriceCrossIndicator(name="SineWMA", parameters=[77, 5], buffer_values=[0], label="Baseline"),
+        c1=LineCrossIndicator(name="ZeroLag_MACD", parameters=[80, 40, 43], buffer_values=[1], label="C1", reverse=True),
+        strategy=Phase2Strategy,
+        plot=False,
+    )
     print_summary(summary)

@@ -6,12 +6,13 @@ class TradeLogger(bt.Analyzer):
         self._open_sizes = {}
 
     def notify_trade(self, trade):
+        name = trade.data._name or "?"
         if trade.justopened:
             direction = "LONG" if trade.long else "SHORT"
             open_dt = bt.num2date(trade.dtopen).strftime("%Y-%m-%d")
             self._open_sizes[id(trade)] = abs(trade.size)
             print(
-                f"[open]  {direction:5s}  dtopen={open_dt}"
+                f"[open]  {name:10s} {direction:5s}  dtopen={open_dt}"
                 f"  entry={trade.price:.5f}  size={abs(trade.size)}"
             )
         if trade.isclosed:
@@ -26,6 +27,6 @@ class TradeLogger(bt.Analyzer):
             else:
                 exit_str = ""
             print(
-                f"[close] {direction:5s}  open={open_dt}  close={close_dt}"
+                f"[close] {name:10s} {direction:5s}  open={open_dt}  close={close_dt}"
                 f"  duration={duration}d{exit_str}  pnl={trade.pnlcomm:+.2f}"
             )
