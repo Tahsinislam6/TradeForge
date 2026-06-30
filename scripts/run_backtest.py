@@ -5,6 +5,7 @@ import os
 import backtrader as bt
 
 from tradeforge.backtest.algorithm import Phase1Strategy, Phase2Strategy
+from tradeforge.backtest.analyzers import TradeLogger
 from tradeforge.backtest.config import *
 from tradeforge.backtest.bt_feed import make_bt_feed
 from tradeforge.config import Config
@@ -70,12 +71,16 @@ def run_backtest(
     cerebro.broker.setcommission(margin=1/30, mult=1.0)
 
 
+    cerebro.addobserver(bt.observers.Broker)
+    if plot:
+        cerebro.addanalyzer(TradeLogger, _name="trade_log")
+
     cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name="trades")
     cerebro.addanalyzer(bt.analyzers.Returns,       _name="returns")
     cerebro.addanalyzer(bt.analyzers.DrawDown,       _name="drawdown")
     cerebro.addanalyzer(bt.analyzers.SharpeRatio,   _name="sharpe", riskfreerate=0.0)
 
-    results     = cerebro.run()
+    results     = cerebro.run(stdstats=False)
     strat       = results[0]
     final_value = cerebro.broker.getvalue()
 
@@ -100,7 +105,7 @@ def run_backtest(
     }
 
     if plot:
-        cerebro.plot(style='candle')
+        cerebro.plot(style='candle', volume=False)
 
     return summary
 

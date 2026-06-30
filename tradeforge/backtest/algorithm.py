@@ -19,7 +19,9 @@ class NNFXBaseStrategy(bt.Strategy):
         self.p.baseline.setup(self)
         self.atr = getattr(self.data.lines, self.p.atr_col)
         self._indicators: list[Indicator] = [self.p.baseline]
-        self._bracket_orders = []
+        self._main_order = None
+        self._sl_order = None
+        self._tp_order = None
 
     def _any_trigger(self) -> bool:
         return any(ind.crossed() for ind in self._indicators)
@@ -41,22 +43,13 @@ class NNFXBaseStrategy(bt.Strategy):
             sl = price + sl_distance
         return tp, sl, size
 
-    def _cancel_bracket(self):
-        for o in self._bracket_orders:
-            if o.alive():
-                self.cancel(o)
-        self._bracket_orders = []
-
-    def notify_trade(self, trade):
-        if not trade.isclosed:
-            return
-        direction = "LONG" if trade.long else "SHORT"
-        open_dt  = bt.num2date(trade.dtopen).strftime("%Y-%m-%d")
-        close_dt = bt.num2date(trade.dtclose).strftime("%Y-%m-%d")
-        print(
-            f"[trade] {direction:5s}  open={open_dt}  close={close_dt}"
-            f"  pnl={trade.pnlcomm:+.2f}"
-        )
+    def _cancel_all(self):
+        for order in (self._main_order, self._sl_order, self._tp_order):
+            if order is not None and order.alive():
+                self.cancel(order)
+        self._main_order = None
+        self._sl_order = None
+        self._tp_order = None
 
     def next(self):
         line_val = self.p.baseline.line[0]
@@ -69,24 +62,53 @@ class NNFXBaseStrategy(bt.Strategy):
             return
 
         directions = self._get_directions()
+        all_long  = all(s == Signal.LONG  for s in directions)
+        all_short = all(s == Signal.SHORT for s in directions)
+        any_long  = any(s == Signal.LONG  for s in directions)
+        any_short = any(s == Signal.SHORT for s in directions)
 
-        if all(s == Signal.LONG for s in directions):
-            if self.position.size < 0:
-                self._cancel_bracket()
-                self.close()
-            if not self.position:
-                tp, sl, size = self._calculate_order_details(long=True)
-                if size > 0:
-                    self._bracket_orders = self.buy_bracket(size=size, stopprice=sl, limitprice=tp)
+        # Exit-only: indicator crosses against current position but no full flip agreement
+        if self.position.size > 0 and any_short and not all_short:
+            self._cancel_all()
+            self.close()
+            return
+        if self.position.size < 0 and any_long and not all_long:
+            self._cancel_all()
+            self.close()
+            return
 
-        elif all(s == Signal.SHORT for s in directions):
+        # Entry / flip (all indicators agree)
+        if all_long:
             if self.position.size > 0:
-                self._cancel_bracket()
+                return
+            if self.position.size < 0:
+                self._cancel_all()
                 self.close()
-            if not self.position:
-                tp, sl, size = self._calculate_order_details(long=False)
-                if size > 0:
-                    self._bracket_orders = self.sell_bracket(size=size, stopprice=sl, limitprice=tp)
+            tp, sl, size = self._calculate_order_details(long=True)
+            if size > 0:
+                orders = self.buy_bracket(
+                    size=size,
+                    exectype=bt.Order.Market,
+                    stopprice=sl,
+                    limitprice=tp,
+                )
+                self._main_order, self._sl_order, self._tp_order = orders
+
+        elif all_short:
+            if self.position.size < 0:
+                return
+            if self.position.size > 0:
+                self._cancel_all()
+                self.close()
+            tp, sl, size = self._calculate_order_details(long=False)
+            if size > 0:
+                orders = self.sell_bracket(
+                    size=size,
+                    exectype=bt.Order.Market,
+                    stopprice=sl,
+                    limitprice=tp,
+                )
+                self._main_order, self._sl_order, self._tp_order = orders
 
 
 # Phase 1 — Baseline only
