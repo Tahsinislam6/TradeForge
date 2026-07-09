@@ -5,10 +5,39 @@ import backtrader as bt
 from tradeforge.backtest.config import Signal, Indicator
 
 
+class _DataState:
+    """Per-instrument ATR reference, shared by every strategy variant."""
+
+    __slots__ = ("atr",)
+
+    def __init__(self, atr):
+        self.atr = atr
+
+
+class _TwoTradeDataState(_DataState):
+    """Per-instrument order bookkeeping for the 2-trade (t1 TP + t2 runner) mechanic."""
+
+    __slots__ = (
+        "t1_main_order", "t1_sl_order", "t1_tp_order",
+        "t2_main_order", "t2_sl_order", "t2_long", "t2_entry_price",
+    )
+
+    def __init__(self, atr):
+        super().__init__(atr)
+        self.t1_main_order = None
+        self.t1_sl_order   = None
+        self.t1_tp_order   = None
+        self.t2_main_order = None
+        self.t2_sl_order   = None
+        self.t2_long       = None
+        self.t2_entry_price = None
+
+
 class NNFXBaseStrategy(bt.Strategy):
 
-    SL_MULTIPLIER = 1.5
-    RISK_PCT = 0.02
+    SL_MULTIPLIER    = 1.5
+    RISK_PCT         = 0.02
+    TRADE2_SIZE_PCT  = 0.5
 
     params = dict(
         baseline=None,
@@ -16,99 +45,207 @@ class NNFXBaseStrategy(bt.Strategy):
     )
 
     def __init__(self):
-        self.p.baseline.setup(self)
-        self.atr = getattr(self.data.lines, self.p.atr_col)
         self._indicators: list[Indicator] = [self.p.baseline]
-        self._main_order = None
-        self._sl_order = None
-        self._tp_order = None
+        self._state: dict[int, _DataState] = {}
+        self.p.baseline.reset()
+        for data in self.datas:
+            self.p.baseline.setup(self, data)
+            atr = getattr(data.lines, self.p.atr_col)
+            self._state[id(data)] = _TwoTradeDataState(atr)
 
-    def _any_trigger(self) -> bool:
-        return any(ind.crossed() for ind in self._indicators)
+    def _any_trigger(self, data) -> bool:
+        return any(ind.crossed(data) for ind in self._indicators)
 
-    def _get_directions(self) -> list[Signal]:
-        return [ind.direction() for ind in self._indicators]
+    def _get_directions(self, data) -> list[Signal]:
+        return [ind.direction(data) for ind in self._indicators]
 
-    def _calculate_order_details(self, long: bool):
-        equity = self.broker.getvalue()
-        cash_risk = equity * self.RISK_PCT
-        sl_distance = self.atr[0] * self.SL_MULTIPLIER
-        size = math.floor(cash_risk / sl_distance)
-        price = self.data.close[0]
+    def _calculate_order_details(self, long: bool, data):
+        state = self._state[id(data)]
+        equity     = self.broker.getvalue()
+        cash_risk  = equity * self.RISK_PCT
+        sl_distance = state.atr[0] * self.SL_MULTIPLIER
+        total_size  = math.floor(cash_risk / sl_distance)
+        price = data.close[0]
         if long:
-            tp = price + self.atr[0]
+            tp = price + state.atr[0]
             sl = price - sl_distance
         else:
-            tp = price - self.atr[0]
+            tp = price - state.atr[0]
             sl = price + sl_distance
-        return tp, sl, size
 
-    def _cancel_all(self):
-        for order in (self._main_order, self._sl_order, self._tp_order):
+        size2 = math.floor(total_size * self.TRADE2_SIZE_PCT)
+        size1 = total_size - size2
+        if size2 > 0 and size1 == 0:
+            size1, size2 = total_size, 0
+
+        return tp, sl, size1, size2
+
+    def _cancel_all(self, data):
+        state = self._state[id(data)]
+        for order in (
+            state.t1_main_order, state.t1_sl_order, state.t1_tp_order,
+            state.t2_main_order, state.t2_sl_order,
+        ):
             if order is not None and order.alive():
                 self.cancel(order)
-        self._main_order = None
-        self._sl_order = None
-        self._tp_order = None
+        state.t1_main_order  = None
+        state.t1_sl_order    = None
+        state.t1_tp_order    = None
+        state.t2_main_order  = None
+        state.t2_sl_order    = None
+        state.t2_long        = None
+        state.t2_entry_price = None
+
+    @staticmethod
+    def _same_order(order, ref_order) -> bool:
+        return ref_order is not None and order.ref == ref_order.ref
+
+    def _move_trade2_to_breakeven(self, data):
+        state = self._state[id(data)]
+        if state.t2_long is None or state.t2_entry_price is None:
+            return
+        old_sl = state.t2_sl_order
+        if old_sl is None or not old_sl.alive():
+            return
+        self.cancel(old_sl)
+        if state.t2_long:
+            new_sl = self.sell(data=data, size=old_sl.size, price=state.t2_entry_price, exectype=bt.Order.Stop)
+        else:
+            new_sl = self.buy(data=data, size=old_sl.size, price=state.t2_entry_price, exectype=bt.Order.Stop)
+        state.t2_sl_order = new_sl
+
+    def notify_order(self, order):
+        if order.status != order.Completed:
+            return
+
+        data  = order.data
+        state = self._state[id(data)]
+
+        if self._same_order(order, state.t2_main_order):
+            state.t2_entry_price = order.executed.price
+            return
+
+        if self._same_order(order, state.t1_tp_order):
+            state.t1_tp_order = None
+            self._move_trade2_to_breakeven(data)
+            return
+
+        if self._same_order(order, state.t1_sl_order):
+            state.t1_sl_order = None
+            state.t1_tp_order = None
+            return
+
+        if self._same_order(order, state.t1_main_order):
+            state.t1_main_order = None
+            return
+
+        if self._same_order(order, state.t2_sl_order):
+            state.t2_sl_order    = None
+            state.t2_long        = None
+            state.t2_entry_price = None
+            return
+
+    def _enter_long(self, data):
+        tp, sl, size1, size2 = self._calculate_order_details(long=True, data=data)
+        state = self._state[id(data)]
+        if size1 > 0:
+            t1 = self.buy_bracket(
+                data=data,
+                size=size1,
+                exectype=bt.Order.Market,
+                stopprice=sl,
+                limitprice=tp,
+            )
+            state.t1_main_order, state.t1_sl_order, state.t1_tp_order = t1
+
+            state.t2_main_order = state.t2_sl_order = None
+            state.t2_long = state.t2_entry_price = None
+            if size2 > 0:
+                t2 = self.buy_bracket(
+                    data=data,
+                    size=size2,
+                    exectype=bt.Order.Market,
+                    stopprice=sl,
+                    limitprice=None,
+                    limitexec=None,
+                )
+                state.t2_main_order, state.t2_sl_order, _ = t2
+                state.t2_long = True
+
+    def _enter_short(self, data):
+        tp, sl, size1, size2 = self._calculate_order_details(long=False, data=data)
+        state = self._state[id(data)]
+        if size1 > 0:
+            t1 = self.sell_bracket(
+                data=data,
+                size=size1,
+                exectype=bt.Order.Market,
+                stopprice=sl,
+                limitprice=tp,
+            )
+            state.t1_main_order, state.t1_sl_order, state.t1_tp_order = t1
+
+            state.t2_main_order = state.t2_sl_order = None
+            state.t2_long = state.t2_entry_price = None
+            if size2 > 0:
+                t2 = self.sell_bracket(
+                    data=data,
+                    size=size2,
+                    exectype=bt.Order.Market,
+                    stopprice=sl,
+                    limitprice=None,
+                    limitexec=None,
+                )
+                state.t2_main_order, state.t2_sl_order, _ = t2
+                state.t2_long = False
 
     def next(self):
-        line_val = self.p.baseline.line[0]
+        for data in self.datas:
+            self._process_data(data)
+
+    def _process_data(self, data):
+        state = self._state[id(data)]
+        line_val = self.p.baseline.line(data)[0]
         if line_val != line_val or line_val == 0:
             return
-        if self.atr[0] != self.atr[0] or self.atr[0] == 0:
+        if state.atr[0] != state.atr[0] or state.atr[0] == 0:
             return
 
-        if not self._any_trigger():
+        if not self._any_trigger(data):
             return
 
-        directions = self._get_directions()
+        directions = self._get_directions(data)
         all_long  = all(s == Signal.LONG  for s in directions)
         all_short = all(s == Signal.SHORT for s in directions)
         any_long  = any(s == Signal.LONG  for s in directions)
         any_short = any(s == Signal.SHORT for s in directions)
 
-        # Exit-only: indicator crosses against current position but no full flip agreement
-        if self.position.size > 0 and any_short and not all_short:
-            self._cancel_all()
-            self.close()
+        position = self.getposition(data)
+
+        if position.size > 0 and any_short and not all_short:
+            self._cancel_all(data)
+            self.close(data=data)
             return
-        if self.position.size < 0 and any_long and not all_long:
-            self._cancel_all()
-            self.close()
+        if position.size < 0 and any_long and not all_long:
+            self._cancel_all(data)
+            self.close(data=data)
             return
 
-        # Entry / flip (all indicators agree)
         if all_long:
-            if self.position.size > 0:
+            if position.size > 0:
                 return
-            if self.position.size < 0:
-                self._cancel_all()
-                self.close()
-            tp, sl, size = self._calculate_order_details(long=True)
-            if size > 0:
-                orders = self.buy_bracket(
-                    size=size,
-                    exectype=bt.Order.Market,
-                    stopprice=sl,
-                    limitprice=tp,
-                )
-                self._main_order, self._sl_order, self._tp_order = orders
+            if position.size < 0:
+                self._cancel_all(data)
+                self.close(data=data)
+            self._enter_long(data)
 
         elif all_short:
-            if self.position.size < 0:
+            if position.size < 0:
                 return
-            if self.position.size > 0:
-                self._cancel_all()
-                self.close()
-            tp, sl, size = self._calculate_order_details(long=False)
-            if size > 0:
-                orders = self.sell_bracket(
-                    size=size,
-                    exectype=bt.Order.Market,
-                    stopprice=sl,
-                    limitprice=tp,
-                )
-                self._main_order, self._sl_order, self._tp_order = orders
+            if position.size > 0:
+                self._cancel_all(data)
+                self.close(data=data)
+            self._enter_short(data)
 
 
 # Phase 1 — Baseline only
@@ -125,5 +262,7 @@ class Phase2Strategy(NNFXBaseStrategy):
 
     def __init__(self):
         super().__init__()
-        self.p.c1.setup(self)
+        self.p.c1.reset()
+        for data in self.datas:
+            self.p.c1.setup(self, data)
         self._indicators.append(self.p.c1)
