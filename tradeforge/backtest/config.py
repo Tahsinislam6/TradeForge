@@ -38,11 +38,13 @@ class Indicator(ABC):
         once per data feed inside strategy __init__."""
         ...
 
+    @abstractmethod
     def reset(self) -> None:
         """Drop all per-data bindings from previous strategy runs. Call once
         before re-using an Indicator instance across separate backtests (the
         instance may be a long-lived singleton, e.g. shared across many
         Optuna trials), so stale bindings don't leak memory."""
+        ...
 
     @abstractmethod
     def crossed(self, data) -> bool:
@@ -174,6 +176,7 @@ class LineCrossIndicator(Indicator):
         return Signal.NONE
 
 
+
 class TwoLineCrossIndicator(Indicator):
     """Fast line crosses above/below slow line."""
 
@@ -213,3 +216,5 @@ class TwoLineCrossIndicator(Indicator):
         if fast[0] < slow[0]:
             return self._maybe_reverse(Signal.SHORT)
         return Signal.NONE
+
+
