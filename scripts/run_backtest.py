@@ -213,8 +213,8 @@ if __name__ == "__main__":
     summary = run_backtest(
         currencies=Config.CURRENCIES,
         # currencies=["AUDNZD_SB"],
-        baseline=PriceCrossIndicator(name="Baseline", parameters=[77, 5], buffer_values=[0], label="Baseline"),
-        c1=LineCrossIndicator(name="C1", parameters=[20,1,44], buffer_values=[0], label="C1", reverse=False),
+        baseline=PriceCrossIndicator(name="Baseline", parameters=[49, 3, 9, 0], buffer_values=[0], label="Baseline"),
+        c1=TwoLineCrossIndicator(name="C1", parameters=[4,8,1, 2, 1, 3000, 0], buffer_values=[2,3], label="C1", reverse=False),
         strategy=Phase2Strategy,
         plot=True,
     )

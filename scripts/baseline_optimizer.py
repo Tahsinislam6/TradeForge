@@ -1,5 +1,6 @@
 import argparse
 import optuna
+import secrets
 from pathlib import Path
 from optuna.samplers import NSGAIISampler
 
@@ -69,8 +70,9 @@ def run_optimization(indicator_name: str, n_trials: int, currencies: list = None
 
     Minimises whipsaw frequency and maximises average bars held, with hard
     constraints on whipsaw, distance/ATR ratio, and average bars held.
-    Results are persisted to a journal file at the project root so the study
-    can be resumed across runs.
+    Results are persisted to a journal file at the project root, each run
+    getting its own randomly-coded study name so repeated runs never
+    collide or resume into each other's trials.
 
     Args:
         indicator_name: MT4 indicator name (e.g. 'VIDYA', 'EMA').
@@ -89,12 +91,13 @@ def run_optimization(indicator_name: str, n_trials: int, currencies: list = None
         raise RuntimeError(f"Failed to load data before optimisation: {e}") from e
 
     suffix = ("_" + "_".join(str(p) for p in fixed_params)) if fixed_params else ""
+    run_code = secrets.token_hex(3)
     study = optuna.create_study(
         directions=["minimize", "maximize", "minimize"],
         sampler=NSGAIISampler(constraints_func=get_constraint_violations),
         storage="sqlite:///" + str(Path(__file__).parent.parent / "optuna.db"),
         # optuna-dashboard sqlite:///optuna.db
-        study_name=indicator_name + "_baseline_optimization" + suffix,
+        study_name=f"{run_code}_{indicator_name}_baseline_optimization{suffix}",
         load_if_exists=True,
     )
     study.optimize(

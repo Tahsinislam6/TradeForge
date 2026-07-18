@@ -1,5 +1,9 @@
 import argparse
+import csv
 import itertools
+import json
+import secrets
+from math import prod
 from pathlib import Path
 
 import optuna
@@ -8,6 +12,7 @@ from functools import partial
 
 from scripts.run_backtest import run_backtest, request_and_load_many
 from tradeforge.backtest.algorithm import Phase2Strategy
+from tradeforge.backtest.candidates.c1_candidates import C1_CANDIDATES, C1Candidate, CategoricalParam, FixedParam, FloatParam, IntParam
 from tradeforge.backtest.config import *
 from tradeforge.config import Config
 from tradeforge.data.cleanup import clear_external_files
@@ -15,21 +20,14 @@ from tradeforge.data.loader import load_static_data, merge_dataframes
 from tradeforge.utils.notification import send_notification
 
 FAILED_TRIAL_VALUE = 1e6
-MIN_TRADES = 100
+MIN_TRADES = 200
 MIN_WIN_RATE = 60.0
 MIN_AVG_BARS_HELD = 8.0
 MAX_DRAWDOWN = 60.0
 
 # ===== Parameters (edit these) =====
 # Fixed, already Phase-1-optimized baseline
-BASELINE = PriceCrossIndicator(name="Baseline", parameters=[77, 5], buffer_values=[0], label="Baseline")
-
-# C1 indicator identity
-C1_NAME = "C1"
-C1_CLASS = TwoLineCrossIndicator
-# C1_CLASS = LineCrossIndicator
-BUFFER_VALUES = [1,0]
-REVERSE = False
+BASELINE = PriceCrossIndicator(name="GeoMin_MA", parameters=[48,3], buffer_values=[0], label="Baseline")
 
 
 def get_constraint_violations(trial, min_trades: int, min_win_rate: float, min_avg_bars_held: float, max_drawdown: float):
@@ -49,19 +47,71 @@ def get_constraint_violations(trial, min_trades: int, min_win_rate: float, min_a
     )
 
 
-def objective(trial: optuna.Trial, currencies: list[str], baseline: Indicator, cached_data: dict, fixed_params: list[int] | None = None, label: str = "C1"):
-    parameters = [
-        trial.suggest_int("param1", 1, 250),
-        trial.suggest_float("param2", 0.1, 10.0, step=0.1),
-    ]
-    c1 = C1_CLASS(
-        name=C1_NAME,
+def _grid_values(spec: IntParam | FloatParam | CategoricalParam) -> list:
+    """Expand an IntParam/FloatParam range into the discrete list of values
+    GridSampler needs (it has no notion of a continuous range). A
+    CategoricalParam's values are already discrete."""
+    if isinstance(spec, CategoricalParam):
+        return list(spec.values)
+    if isinstance(spec, IntParam):
+        return list(range(spec.low, spec.high + 1, spec.step))
+    steps = round((spec.high - spec.low) / spec.step) + 1
+    return [round(spec.low + i * spec.step, 10) for i in range(steps)]
+
+
+def _grid_search_space(param_space: list[IntParam | FloatParam | CategoricalParam | FixedParam]) -> dict[str, list]:
+    # FixedParam entries aren't suggested via trial.suggest_*, so they don't
+    # need (and can't have) a grid entry.
+    return {
+        f"p{i + 1}": _grid_values(spec)
+        for i, spec in enumerate(param_space)
+        if isinstance(spec, (IntParam, FloatParam, CategoricalParam))
+    }
+
+
+def _build_sampler(c1_spec: C1Candidate) -> optuna.samplers.BaseSampler:
+    if c1_spec.sampler == "grid":
+        return GridSampler(_grid_search_space(c1_spec.param_space))
+    return NSGAIISampler(constraints_func=partial(
+        get_constraint_violations,
+        min_trades=MIN_TRADES,
+        min_win_rate=MIN_WIN_RATE,
+        min_avg_bars_held=MIN_AVG_BARS_HELD,
+        max_drawdown=MAX_DRAWDOWN,
+    ))
+
+
+def _suggest_params(trial: optuna.Trial, param_space: list[IntParam | FloatParam | CategoricalParam | FixedParam]) -> list:
+    """Build a candidate's parameter list in order: IntParam/FloatParam/
+    CategoricalParam entries are suggested by Optuna (named p1, p2, ... in
+    trial order); FixedParam entries are passed through unchanged on every
+    trial."""
+    params = []
+    for i, spec in enumerate(param_space):
+        pname = f"p{i + 1}"
+        if isinstance(spec, IntParam):
+            params.append(trial.suggest_int(pname, spec.low, spec.high, step=spec.step))
+        elif isinstance(spec, FloatParam):
+            params.append(trial.suggest_float(pname, spec.low, spec.high, step=spec.step))
+        elif isinstance(spec, CategoricalParam):
+            params.append(trial.suggest_categorical(pname, spec.values))
+        else:
+            params.append(spec.value)
+    return params
+
+
+def objective(trial: optuna.Trial, currencies: list[str], baseline: Indicator, cached_data: dict, c1_spec: C1Candidate, label: str = "C1"):
+    parameters = _suggest_params(trial, c1_spec.param_space)
+    c1_kwargs = dict(
+        name=c1_spec.name,
         parameters=parameters,
-        buffer_values=BUFFER_VALUES,
+        buffer_values=c1_spec.buffer_values,
         label=label,
-        reverse=REVERSE,
-        # cross_level=50,
+        reverse=c1_spec.reverse,
     )
+    if c1_spec.cls is LineCrossIndicator:
+        c1_kwargs["cross_level"] = c1_spec.cross_level
+    c1 = c1_spec.cls(**c1_kwargs)
 
     try:
         summary = run_backtest(
@@ -94,91 +144,210 @@ def objective(trial: optuna.Trial, currencies: list[str], baseline: Indicator, c
     if total_trades <= MIN_TRADES:
         raise optuna.exceptions.TrialPruned()
 
-    score = min(win_rate / 75, 1.0) * 70 + min(avg_bars_held / 12, 1.0) * 30
+    score = min(win_rate / 75, 1.0) * 70 + min(avg_bars_held / 10, 1.0) * 30
     return score
+
+
+def load_baseline_cache(currencies: list[str], baseline: Indicator) -> dict:
+    """Load static OHLC/ATR data and fetch the fixed baseline from MT4 once,
+    merged together. The baseline doesn't vary across C1 candidates in a
+    batch run, so callers sweeping multiple candidates should call this once
+    and reuse the result instead of re-fetching per candidate."""
+    try:
+        cached_data = load_static_data(currencies)
+        baseline_dfs = request_and_load_many(currencies, baseline, trial=0)
+        for currency in currencies:
+            cached_data[currency] = merge_dataframes(cached_data[currency], baseline_dfs[currency])
+        return cached_data
+    except Exception as e:
+        raise RuntimeError(f"Failed to load data before optimisation: {e}") from e
+
+
+BEST_TRIALS_CSV = Path(__file__).parent.parent / "phase2_best_trials.csv"
+
+def export_best_trials(studies: list[optuna.Study], csv_path: Path = BEST_TRIALS_CSV) -> None:
+    """Write one row per study's best trial to csv_path, creating it with a
+    header on first write. Everything comes off the study itself (name,
+    c1_name/etc. user_attrs set in run_optimization, best_trial's value/
+    params/user_attrs) instead of anything tracked separately during the
+    run, so this can just as well be pointed at studies loaded later from
+    optuna.db. Params are dumped as JSON since each candidate's param_space
+    has a different number of keys. A study with no completed trials at all
+    is logged and skipped. For constrained (nsga2) studies, best_trial only
+    considers trials that satisfy every constraint (Optuna excludes
+    infeasible ones); if none do, this falls back to the highest-scoring
+    completed trial regardless of feasibility and flags it via the
+    'feasible' column so it's still visible instead of the study being
+    silently dropped."""
+    rows = []
+    for study in studies:
+        feasible = True
+        try:
+            best = study.best_trial
+        except ValueError:
+            completed = study.get_trials(deepcopy=False, states=(optuna.trial.TrialState.COMPLETE,))
+            if not completed:
+                # print(f"[best] {study.study_name}: no completed trials")
+                continue
+            # print(f"[best] {study.study_name}: no feasible trial, falling back to best score (infeasible)")
+            best = max(completed, key=lambda t: t.value)
+            feasible = False
+        rows.append({
+            "baseline_name": study.user_attrs.get("baseline_name"),
+            "baseline_parameters": study.user_attrs.get("baseline_parameters"),
+            "c1_name": study.user_attrs.get("c1_name"),
+            "params": json.dumps(best.params),
+            "fixed_params": study.user_attrs.get("fixed_params") or None,
+            "buffer_values": study.user_attrs.get("buffer_values"),
+            "cross_level": study.user_attrs.get("cross_level"),
+            "reverse": study.user_attrs.get("reverse"),
+            "total_trades": best.user_attrs.get("total_trades"),
+            "win_rate": best.user_attrs.get("win_rate"),
+            "avg_bars_held": best.user_attrs.get("avg_bars_held"),
+            "max_drawdown": best.user_attrs.get("max_drawdown"),
+            "score": best.value,
+            "date_completed": best.datetime_complete.strftime("%d/%m/%Y") if best.datetime_complete else None,                        
+            "study_name": study.study_name,
+        })
+
+    if not rows:
+        return
+
+    write_header = not csv_path.exists()
+    with open(csv_path, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        if write_header:
+            writer.writeheader()
+        writer.writerows(rows)
 
 
 def run_optimization(
     currencies: list[str],
     baseline: Indicator,
-    n_trials: int,
-    fixed_params: list[int] | None = None,
+    c1_spec: C1Candidate,
+    n_trials: int | None = None,
+    cached_data: dict | None = None,
     label: str = "C1",
 ) -> optuna.Study:
-    """Run a grid-search optimisation over C1's parameters.
+    """Run an Optuna optimisation over one C1 candidate's parameters.
 
     Holds the baseline fixed and scores real Phase2Strategy backtests (run
     against all of `currencies` together in one shared-equity portfolio
     backtest per trial) by a weighted combination of win rate and average
-    bars held, pruning any trial that violates the hard constraints: minimum
-    trades (MIN_TRADES), minimum win rate (MIN_WIN_RATE), minimum average
-    bars held (MIN_AVG_BARS_HELD), and maximum drawdown (MAX_DRAWDOWN).
-    Results are persisted to a sqlite database at the project root so the
-    study can be resumed across runs.
+    bars held. With the default "nsga2" sampler this also enforces hard
+    constraints: minimum trades (MIN_TRADES), minimum win rate
+    (MIN_WIN_RATE), minimum average bars held (MIN_AVG_BARS_HELD), and
+    maximum drawdown (MAX_DRAWDOWN) — see C1Candidate.sampler for the
+    "grid" alternative and what it does/doesn't enforce.
+    Results are persisted to a sqlite database at the project root, each
+    run getting its own randomly-coded study name so repeated runs never
+    collide or resume into each other's trials.
 
     Args:
         currencies: Currency pairs to backtest against (e.g. ['EURUSD_SB']).
         baseline: Fixed, already-optimized baseline Indicator.
+        c1_spec: C1 candidate identity + parameter search space (mix of
+            searched IntParam/FloatParam/CategoricalParam and constant
+            FixedParam entries).
+            If c1_spec.n_trials is set, it overrides n_trials for this run.
+            c1_spec.sampler selects the Optuna sampler ("nsga2" or "grid").
+        n_trials: Default trial count if c1_spec.n_trials isn't set. Only
+            optional because "grid" candidates can derive their own count
+            from the search space — "nsga2" candidates need one from here
+            or from c1_spec.n_trials.
+        cached_data: Pre-loaded static+baseline data from load_baseline_cache.
+            Loaded internally if omitted, so this still works standalone.
 
     Returns:
         The completed optuna.Study object.
     """
-    try:
-        cached_data = load_static_data(currencies)
-        # Baseline is fixed for the whole Phase 2 run (only C1 varies per
-        # trial), so fetch it from MT4 once here and merge it into the
-        # cached data instead of re-requesting it on every trial.
-        baseline_dfs = request_and_load_many(currencies, baseline, trial=0)
-        for currency in currencies:
-            cached_data[currency] = merge_dataframes(cached_data[currency], baseline_dfs[currency])
-    except Exception as e:
-        raise RuntimeError(f"Failed to load data before optimisation: {e}") from e
+    if cached_data is None:
+        cached_data = load_baseline_cache(currencies, baseline)
 
-    suffix = ("_" + "_".join(str(p) for p in fixed_params)) if fixed_params else ""
-    study_name = f"{C1_NAME}_phase2_optimization{suffix}"
+    if c1_spec.n_trials is not None:
+        n_trials = c1_spec.n_trials
+    elif c1_spec.sampler == "grid":
+        # GridSampler auto-stops once every combination has been tried, so
+        # just hand it the exact grid size instead of asking for a count.
+        n_trials = prod(len(v) for v in _grid_search_space(c1_spec.param_space).values())
+    if n_trials is None:
+        raise ValueError(
+            f"No trial count for '{c1_spec.name}': pass --trials on the CLI, "
+            f"or set n_trials on this C1Candidate (required for sampler='nsga2')."
+        )
+
+    # Any FixedParam values get baked into the study name so two candidates
+    # with the same MT4 name but different fixed values (e.g. different MA
+    # types) don't collide on the same resumable study. A random code is
+    # also prefixed so every run starts a fresh study instead of resuming
+    # into a prior run's accumulated trials.
+    fixed_values = [spec.value for spec in c1_spec.param_space if isinstance(spec, FixedParam)]
+    run_code = secrets.token_hex(3)
+    study_name = f"{run_code}_{c1_spec.name}_phase2_optimization"
     study = optuna.create_study(
         direction="maximize",
-        # sampler=GridSampler({"param1": list(range(1, 251))}),
-        sampler=NSGAIISampler(constraints_func=partial(
-            get_constraint_violations,
-            min_trades=MIN_TRADES,
-            min_win_rate=MIN_WIN_RATE,
-            min_avg_bars_held=MIN_AVG_BARS_HELD,
-            max_drawdown=MAX_DRAWDOWN,
-        )),
+        sampler=_build_sampler(c1_spec),
         storage="sqlite:///" + str(Path(__file__).parent.parent / "optuna.db"),
         # optuna-dashboard sqlite:///optuna.db
         study_name=study_name,
         load_if_exists=True,
     )
+    study.set_user_attr("c1_name", c1_spec.name)
+    study.set_user_attr("c1_class", c1_spec.cls.__name__)
+    study.set_user_attr("buffer_values", c1_spec.buffer_values)
+    study.set_user_attr("reverse", c1_spec.reverse)
+    study.set_user_attr("cross_level", c1_spec.cross_level)
+    study.set_user_attr("fixed_params", fixed_values)
+    study.set_user_attr("baseline_name", baseline.name)
+    study.set_user_attr("baseline_parameters", baseline.parameters)
+
+
     study.optimize(
-        lambda trial: objective(trial, currencies, baseline, cached_data, fixed_params, label),
+        lambda trial: objective(trial, currencies, baseline, cached_data, c1_spec, label),
         n_trials=n_trials,
         show_progress_bar=False,
         gc_after_trial=True,
     )
+
     return study
 
 
-TELEGRAM_MESSAGE_LIMIT = 4096
+def run_all(
+    currencies: list[str],
+    baseline: Indicator,
+    n_trials: int | None = None,
+    candidates: list[C1Candidate] = C1_CANDIDATES,
+) -> None:
+    """Sweep every candidate in `candidates` against the fixed `baseline`,
+    one Optuna study each. `n_trials` is the default trial count, used for
+    any candidate that doesn't set its own C1Candidate.n_trials. A candidate
+    that fails outright (e.g. a misspelled MT4 indicator name) is logged and
+    skipped so it doesn't abort the rest of the batch. The only Telegram
+    notification sent is a plain "Phase 2 complete" once the whole batch is
+    done."""
+    cached_data = load_baseline_cache(currencies, baseline)
 
+    completed, failed, studies = [], [], []
+    for c1_spec in candidates:
+        print(f"\n=== C1 candidate: {c1_spec.name} ===")
+        try:
+            studies.append(run_optimization(
+                currencies=currencies,
+                baseline=baseline,
+                c1_spec=c1_spec,
+                n_trials=n_trials,
+                cached_data=cached_data,
+            ))
+        except Exception as e:
+            print(f"[ERROR] {c1_spec.name} failed: {e}")
+            failed.append(c1_spec.name)
+            continue
 
-def print_pareto_front(study: optuna.Study) -> str:
-    """Print the Pareto front and return it as a Telegram-ready message
-    (truncated to Telegram's message length limit if needed)."""
-    lines = [f"Pareto front ({len(study.best_trials)} trials):"]
-    for trial in study.best_trials:
-        score = trial.values[0]
-        lines.append(
-            f"trial={trial.number} params={trial.params} "
-            f"score={score:.3f}"
-        )
-    print("\n".join(lines))
+        completed.append(c1_spec.name)
 
-    message = "\n".join(lines)
-    if len(message) > TELEGRAM_MESSAGE_LIMIT:
-        message = message[:TELEGRAM_MESSAGE_LIMIT - 20].rsplit("\n", 1)[0] + "\n... (truncated)"
-    return message
+    export_best_trials(studies)
+    print(f"Phase 2 batch complete. Completed: {completed or 'none'}. Failed: {failed or 'none'}.")
+    send_notification("Phase 2 complete")
 
 
 if __name__ == "__main__":
@@ -186,14 +355,23 @@ if __name__ == "__main__":
     parser.add_argument("currency", type=str, nargs="?", default=None,
                          help="Currency pair (e.g. EURUSD_SB). Defaults to a single portfolio "
                               "optimization across every currency in Config.CURRENCIES.")
-    parser.add_argument("trials", type=int, help="Number of Optuna trials")
+    parser.add_argument("--trials", type=int, default=None,
+                         help="Default number of Optuna trials, used for any C1_CANDIDATES "
+                              "entry that doesn't set its own n_trials. Not required if "
+                              "every candidate being run sets its own n_trials or uses "
+                              "sampler='grid' (which derives its own trial count).")
+    parser.add_argument("--only", type=str, default=None,
+                         help="Only test the C1_CANDIDATES entry with this name "
+                              "(case-insensitive), instead of sweeping the whole list.")
     args = parser.parse_args()
 
     currencies = [args.currency] if args.currency else Config.CURRENCIES
 
-    # for id1, id2, id3 in itertools.product(range(1), range(7), range(4)):
-    # for id in range(3, 11):
-    study = run_optimization(currencies=currencies, baseline=BASELINE, n_trials=args.trials)
-    message = print_pareto_front(study)
-    send_notification(message)
-    send_notification("Phase 2 optimization complete")
+    candidates = C1_CANDIDATES
+    if args.only:
+        candidates = [c for c in C1_CANDIDATES if c.name.lower() == args.only.lower()]
+        if not candidates:
+            available = ", ".join(c.name for c in C1_CANDIDATES)
+            raise SystemExit(f"No C1_CANDIDATES entry named '{args.only}'. Available: {available}")
+
+    run_all(currencies=currencies, baseline=BASELINE, n_trials=args.trials, candidates=candidates)
