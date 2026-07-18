@@ -12,4 +12,5 @@ venv/
 .env
 .env.local
 *.env
+tradeforge/backtest/candidates/c1_candidates.py
 # If you want to allow specific CSVs, use ! (uncomment and edit as needed)
