@@ -8,6 +8,7 @@ from tradeforge.backtest.baseline import baseline_backtest, BaselineMetrics
 from tradeforge.config import Config
 from tradeforge.data.loader import load_static_data
 from tradeforge.data.request import request_indicator
+from tradeforge.data.zigzag import calculate_atr_zigzag
 from tradeforge.utils.notification import send_notification
 
 FAILED_TRIAL_VALUE = 1e6
@@ -58,17 +59,18 @@ def objective(trial: optuna.Trial, indicator_name: str, currencies: list, cached
     trial.set_user_attr("trend_capture", metrics.trend_capture)
     trial.set_user_attr("whipsaw_frequency", metrics.whipsaw_frequency)
     trial.set_user_attr("avg_bars_held", metrics.avg_bars_held)
+    trial.set_user_attr("capture_efficiency", metrics.capture_efficiency)
 
-    if metrics.whipsaw_frequency is None:
+    if metrics.whipsaw_frequency is None or metrics.capture_efficiency is None:
         raise optuna.exceptions.TrialPruned()
 
-    return metrics.whipsaw_frequency, metrics.avg_bars_held, metrics.distance_atr_ratio
+    return metrics.whipsaw_frequency, metrics.capture_efficiency
 
 
 def run_optimization(indicator_name: str, n_trials: int, currencies: list = None, fixed_params: list[int] | None = None):
     """Run NSGA-II multi-objective optimisation over the indicator's parameters.
 
-    Minimises whipsaw frequency and maximises average bars held, with hard
+    Minimises whipsaw frequency and maximises capture efficiency, with hard
     constraints on whipsaw, distance/ATR ratio, and average bars held.
     Results are persisted to a journal file at the project root, each run
     getting its own randomly-coded study name so repeated runs never
@@ -90,10 +92,15 @@ def run_optimization(indicator_name: str, n_trials: int, currencies: list = None
     except Exception as e:
         raise RuntimeError(f"Failed to load data before optimisation: {e}") from e
 
+    cached_data = {
+        currency: calculate_atr_zigzag(data, k=Config.ZIGZAG_ATR_MULTIPLIER)
+        for currency, data in cached_data.items()
+    }
+
     suffix = ("_" + "_".join(str(p) for p in fixed_params)) if fixed_params else ""
     run_code = secrets.token_hex(3)
     study = optuna.create_study(
-        directions=["minimize", "maximize", "minimize"],
+        directions=["minimize", "maximize"],
         sampler=NSGAIISampler(constraints_func=get_constraint_violations),
         storage="sqlite:///" + str(Path(__file__).parent.parent / "optuna.db"),
         # optuna-dashboard sqlite:///optuna.db

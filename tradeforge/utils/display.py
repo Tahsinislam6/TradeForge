@@ -50,4 +50,9 @@ def format_metrics(metrics: BaselineMetrics) -> str:
     else:
         lines.append(f"  Distance/ATR Ratio:   {'N/A':>7}  [? UNAVAILABLE]")
 
+    if metrics.capture_efficiency is not None:
+        lines.append(f"  Capture Efficiency:   {metrics.capture_efficiency:7.4f}")
+    else:
+        lines.append(f"  Capture Efficiency:   {'N/A':>7}  [? UNAVAILABLE]")
+
     return "\n".join(lines)

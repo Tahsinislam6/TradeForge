@@ -25,6 +25,7 @@ class BaselineMetrics:
     avg_bars_held: Optional[float]
     trend_capture: Optional[float]
     distance_atr_ratio: Optional[float]
+    capture_efficiency: Optional[float] = None
 
     def __str__(self) -> str:
         parts = []
@@ -36,6 +37,8 @@ class BaselineMetrics:
             parts.append(f"Trend Capture: {self.trend_capture:.4f}")
         if self.distance_atr_ratio is not None:
             parts.append(f"Distance/ATR: {self.distance_atr_ratio:.4f}")
+        if self.capture_efficiency is not None:
+            parts.append(f"Capture Efficiency: {self.capture_efficiency:.4f}")
         return " | ".join(parts)
 
 
@@ -85,12 +88,14 @@ def baseline_backtest(
     bars_held = [r.avg_bars_held for r in results if r.avg_bars_held is not None]
     trend_captures = [r.trend_capture for r in results if r.trend_capture is not None]
     distances = [r.distance_atr_ratio for r in results if r.distance_atr_ratio is not None]
+    capture_efficiencies = [r.capture_efficiency for r in results if r.capture_efficiency is not None]
 
     metrics = BaselineMetrics(
         whipsaw_frequency=np.mean(whipsaw_freqs) if whipsaw_freqs else None,
         avg_bars_held=np.mean(bars_held) if bars_held else None,
         trend_capture=np.mean(trend_captures) if trend_captures else None,
         distance_atr_ratio=np.mean(distances) if distances else None,
+        capture_efficiency=np.mean(capture_efficiencies) if capture_efficiencies else None,
     )
 
     if print_results:
@@ -114,6 +119,11 @@ class BaselineCurrencyTest:
         self.avg_bars_held: Optional[float] = None
         self.trend_capture: Optional[float] = None
         self.distance_atr_ratio: Optional[float] = None
+        self.capture_efficiency: Optional[float] = None
+        # Raw per-run bar counts (gap between one confirmed direction flip and
+        # the next), exposed for empirical calibration of the whipsaw window —
+        # see scripts/whipsaw_window_analysis.py.
+        self.run_bars_held: list[int] = []
 
     def prepare_data(self) -> pd.DataFrame:
         """Merge baselinedata."""
@@ -132,9 +142,12 @@ class BaselineCurrencyTest:
         """Calculate NNFX baseline metrics."""
         working_df = df.copy()
 
-        # Detect and normalize column names    
+        # Detect and normalize column names
         baseline_col = self._find_column(working_df, ["Baseline_Buffer_0", "baseline"])
-        atr_col = self._find_column(working_df, ["ATR_Buffer_0", "atr"]) 
+        atr_col = self._find_column(working_df, ["ATR_Buffer_0", "atr"])
+        zigzag_pivot_col = self._find_column(working_df, ["zigzag_pivot"])
+        zigzag_price_col = self._find_column(working_df, ["zigzag_price"])
+        has_zigzag = zigzag_pivot_col is not None and zigzag_price_col is not None
 
         if not baseline_col:
             raise ValueError("Baseline column not found (expected 'Baseline_Buffer_0' or 'baseline')")
@@ -173,6 +186,14 @@ class BaselineCurrencyTest:
             self.distance_atr_ratio = None
             return
 
+        working_df["_pos"] = np.arange(len(working_df))
+
+        # Reference ZigZag pivots (sorted by position) used for capture efficiency
+        if has_zigzag:
+            pivot_mask = working_df[zigzag_pivot_col].fillna(0) != 0
+            pivot_positions = working_df.loc[pivot_mask, "_pos"].to_numpy()
+            pivot_prices = working_df.loc[pivot_mask, zigzag_price_col].to_numpy()
+
         # Detect price side relative to baseline
         working_df["side"] = (working_df["Close"] > working_df["baseline"]).astype(int)
 
@@ -202,10 +223,34 @@ class BaselineCurrencyTest:
                     else np.nan
                 )
 
+            # Capture efficiency: captured move (in the baseline's claimed
+            # direction) vs. the reference swing spanned by the nearest
+            # bracketing ZigZag pivots.
+            capture_efficiency_val = np.nan
+            if has_zigzag and len(pivot_positions) > 0:
+                start_pos = group["_pos"].iloc[0]
+                end_pos = group["_pos"].iloc[-1]
+
+                # Nearest pivot at/before the stint start, and at/after the stint end
+                before_idx = np.searchsorted(pivot_positions, start_pos, side="right") - 1
+                after_idx = np.searchsorted(pivot_positions, end_pos, side="left")
+
+                if before_idx >= 0 and after_idx < len(pivot_positions) and before_idx != after_idx:
+                    price_before = pivot_prices[before_idx]
+                    price_after = pivot_prices[after_idx]
+                    reference_move = abs(price_after - price_before)
+                    if pd.notna(reference_move) and reference_move > 0:
+                        direction = group["side"].iloc[0]
+                        captured_move = (
+                            (price_end - price_start) if direction == 1 else (price_start - price_end)
+                        )
+                        capture_efficiency_val = captured_move / reference_move
+
             run_metrics.append({
                 "bars_held": bars_held,
                 "trend_distance": trend_distance,
                 "trend_capture": trend_capture_val,
+                "capture_efficiency": capture_efficiency_val,
             })
 
         run_df = pd.DataFrame(run_metrics)
@@ -215,8 +260,10 @@ class BaselineCurrencyTest:
             self.trend_capture = 0.0
             return
 
-        # Whipsaw frequency: runs ≤ 3 bars (NNFX: reverses within 3 bars)
-        whipsaws = run_df[run_df["bars_held"] <= 3]
+        self.run_bars_held = run_df["bars_held"].tolist()
+
+        # Whipsaw frequency: runs ≤ 5 bars (NNFX: reverses within 5 bars)
+        whipsaws = run_df[run_df["bars_held"] <= 5]
         self.whipsaw_frequency = (len(whipsaws) / len(run_df)) * 100
 
         # Average bars held
@@ -225,6 +272,13 @@ class BaselineCurrencyTest:
         # Trend capture (mean of normalized trend distances)
         trend_capture_series = run_df["trend_capture"].dropna()
         self.trend_capture = trend_capture_series.mean() if not trend_capture_series.empty else 0.0
+
+        # Capture efficiency (mean of captured/reference swing ratios, ZigZag-based)
+        if has_zigzag:
+            capture_efficiency_series = run_df["capture_efficiency"].dropna()
+            self.capture_efficiency = (
+                capture_efficiency_series.mean() if not capture_efficiency_series.empty else None
+            )
 
         # Distance/ATR ratio
         self.distance_atr_ratio = None

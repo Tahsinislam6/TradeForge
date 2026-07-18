@@ -17,3 +17,9 @@ class Config:
     BASELINE_MIN_TREND_CAPTURE = 0.1
     BASELINE_MIN_ATR_RATIO = 1.3
     BASELINE_MAX_ATR_RATIO = 2.0
+
+    # ATR-based ZigZag
+    # k=3.0: pivot-count elbow on 7.9y D1 history, independently confirmed on
+    # EURUSD/CHFJPY/AUDNZD. Median reference-swing duration 18-21 bars (vs. the
+    # 8.5-bar BASELINE_MIN_AVG_BARS_HELD floor) and 110-320x a typical spread.
+    ZIGZAG_ATR_MULTIPLIER = 3.0

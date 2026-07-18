@@ -7,6 +7,7 @@ from tradeforge.backtest.baseline import baseline_backtest
 from tradeforge.config import Config
 from tradeforge.data.loader import load_static_data
 from tradeforge.data.request import request_indicator
+from tradeforge.data.zigzag import calculate_atr_zigzag
 from tradeforge.utils.display import format_metrics, parse_number, print_header
 
 
@@ -66,6 +67,10 @@ def main():
     print("\n  Loading data...")
     try:
         cached_data = load_static_data(currencies)
+        cached_data = {
+            currency: calculate_atr_zigzag(data, k=Config.ZIGZAG_ATR_MULTIPLIER)
+            for currency, data in cached_data.items()
+        }
         request_indicator(currencies, parameters=parameters, indicator_name=indicator_name, buffer_values=0, trial_number=0)
 
     except Exception as e:
