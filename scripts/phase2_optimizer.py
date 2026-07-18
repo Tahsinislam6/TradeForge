@@ -3,16 +3,15 @@ import csv
 import itertools
 import json
 import secrets
-from math import prod
 from pathlib import Path
 
 import optuna
-from optuna.samplers import GridSampler, NSGAIISampler
 from functools import partial
 
 from scripts.run_backtest import run_backtest, request_and_load_many
 from tradeforge.backtest.algorithm import Phase2Strategy
-from tradeforge.backtest.candidates.c1_candidates import C1_CANDIDATES, C1Candidate, CategoricalParam, FixedParam, FloatParam, IntParam
+from tradeforge.backtest.candidates.c1_candidates import C1_CANDIDATES, C1Candidate
+from tradeforge.backtest.candidates.param_space import build_sampler, grid_trial_count, suggest_params
 from tradeforge.backtest.config import *
 from tradeforge.config import Config
 from tradeforge.data.cleanup import clear_external_files
@@ -47,32 +46,8 @@ def get_constraint_violations(trial, min_trades: int, min_win_rate: float, min_a
     )
 
 
-def _grid_values(spec: IntParam | FloatParam | CategoricalParam) -> list:
-    """Expand an IntParam/FloatParam range into the discrete list of values
-    GridSampler needs (it has no notion of a continuous range). A
-    CategoricalParam's values are already discrete."""
-    if isinstance(spec, CategoricalParam):
-        return list(spec.values)
-    if isinstance(spec, IntParam):
-        return list(range(spec.low, spec.high + 1, spec.step))
-    steps = round((spec.high - spec.low) / spec.step) + 1
-    return [round(spec.low + i * spec.step, 10) for i in range(steps)]
-
-
-def _grid_search_space(param_space: list[IntParam | FloatParam | CategoricalParam | FixedParam]) -> dict[str, list]:
-    # FixedParam entries aren't suggested via trial.suggest_*, so they don't
-    # need (and can't have) a grid entry.
-    return {
-        f"p{i + 1}": _grid_values(spec)
-        for i, spec in enumerate(param_space)
-        if isinstance(spec, (IntParam, FloatParam, CategoricalParam))
-    }
-
-
 def _build_sampler(c1_spec: C1Candidate) -> optuna.samplers.BaseSampler:
-    if c1_spec.sampler == "grid":
-        return GridSampler(_grid_search_space(c1_spec.param_space))
-    return NSGAIISampler(constraints_func=partial(
+    return build_sampler(c1_spec.sampler, c1_spec.param_space, constraints_func=partial(
         get_constraint_violations,
         min_trades=MIN_TRADES,
         min_win_rate=MIN_WIN_RATE,
@@ -81,27 +56,8 @@ def _build_sampler(c1_spec: C1Candidate) -> optuna.samplers.BaseSampler:
     ))
 
 
-def _suggest_params(trial: optuna.Trial, param_space: list[IntParam | FloatParam | CategoricalParam | FixedParam]) -> list:
-    """Build a candidate's parameter list in order: IntParam/FloatParam/
-    CategoricalParam entries are suggested by Optuna (named p1, p2, ... in
-    trial order); FixedParam entries are passed through unchanged on every
-    trial."""
-    params = []
-    for i, spec in enumerate(param_space):
-        pname = f"p{i + 1}"
-        if isinstance(spec, IntParam):
-            params.append(trial.suggest_int(pname, spec.low, spec.high, step=spec.step))
-        elif isinstance(spec, FloatParam):
-            params.append(trial.suggest_float(pname, spec.low, spec.high, step=spec.step))
-        elif isinstance(spec, CategoricalParam):
-            params.append(trial.suggest_categorical(pname, spec.values))
-        else:
-            params.append(spec.value)
-    return params
-
-
 def objective(trial: optuna.Trial, currencies: list[str], baseline: Indicator, cached_data: dict, c1_spec: C1Candidate, label: str = "C1"):
-    parameters = _suggest_params(trial, c1_spec.param_space)
+    parameters = suggest_params(trial, c1_spec.param_space)
     c1_kwargs = dict(
         name=c1_spec.name,
         parameters=parameters,
@@ -269,7 +225,7 @@ def run_optimization(
     elif c1_spec.sampler == "grid":
         # GridSampler auto-stops once every combination has been tried, so
         # just hand it the exact grid size instead of asking for a count.
-        n_trials = prod(len(v) for v in _grid_search_space(c1_spec.param_space).values())
+        n_trials = grid_trial_count(c1_spec.param_space)
     if n_trials is None:
         raise ValueError(
             f"No trial count for '{c1_spec.name}': pass --trials on the CLI, "
