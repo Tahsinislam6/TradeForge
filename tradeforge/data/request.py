@@ -1,4 +1,7 @@
 from tradeforge.mt4.client import MT4Client
+from tradeforge.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 client = MT4Client()
 
@@ -26,7 +29,7 @@ def request_ohlc(currencies: list[str], timeframe: str = "PERIOD_D1"):
     if response.get("status") == "OK":
         return True
     else:
-        print(f"Error requesting OHLC data")
+        logger.warning(f"Error requesting OHLC data for {currencies}: {response}")
         return False
     
 def request_indicator(currencies: list[str], parameters, indicator_name: str, buffer_values, timeframe: str = "PERIOD_D1", trial_number: int = 0):
@@ -53,6 +56,6 @@ def request_indicator(currencies: list[str], parameters, indicator_name: str, bu
     if response.get("status") == "OK" and response.get("trial_number") == trial_number:
         return True
     else:
-        print(f"Error requesting Indicator data")
+        logger.warning(f"Error requesting {indicator_name} data for {currencies} (trial {trial_number}): {response}")
         return False
     
