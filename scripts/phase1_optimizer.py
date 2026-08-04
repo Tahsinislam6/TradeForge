@@ -97,6 +97,31 @@ def load_baseline_data(currencies: list[str]) -> dict:
     }
 
 
+def _resolve_trial_count(candidate: BaselineCandidate, n_trials: int | None) -> int:
+    """Resolve how many trials run_optimization should run for this candidate.
+
+    Precedence: candidate.n_trials overrides everything; a "grid" sampler
+    with no candidate.n_trials derives its exact count from the search
+    space (ignoring the passed-in default); otherwise the caller-supplied
+    default is used.
+
+    Raises:
+        ValueError: no trial count could be determined — only possible for
+            a non-grid candidate with neither candidate.n_trials nor a
+            caller-supplied default.
+    """
+    if candidate.n_trials is not None:
+        return candidate.n_trials
+    if candidate.sampler == "grid":
+        return grid_trial_count(candidate.param_space)
+    if n_trials is None:
+        raise ValueError(
+            f"No trial count for '{candidate.name}': pass --trials on the CLI, "
+            f"or set n_trials on this BaselineCandidate (required for sampler='nsga2')."
+        )
+    return n_trials
+
+
 def run_optimization(
     candidate: BaselineCandidate,
     n_trials: int | None = None,
@@ -135,17 +160,10 @@ def run_optimization(
     if cached_data is None:
         cached_data = load_baseline_data(currencies)
 
-    if candidate.n_trials is not None:
-        n_trials = candidate.n_trials
-    elif candidate.sampler == "grid":
-        # GridSampler auto-stops once every combination has been tried, so
-        # just hand it the exact grid size instead of asking for a count.
-        n_trials = grid_trial_count(candidate.param_space)
-    if n_trials is None:
-        raise ValueError(
-            f"No trial count for '{candidate.name}': pass --trials on the CLI, "
-            f"or set n_trials on this BaselineCandidate (required for sampler='nsga2')."
-        )
+    # GridSampler auto-stops once every combination has been tried, so a
+    # "grid" candidate derives its own exact trial count instead of using
+    # the caller-supplied default — see _resolve_trial_count.
+    n_trials = _resolve_trial_count(candidate, n_trials)
 
     fixed = fixed_values(candidate.param_space)
     suffix = ("_" + "_".join(str(p) for p in fixed)) if fixed else ""
