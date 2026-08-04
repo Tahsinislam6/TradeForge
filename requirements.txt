@@ -5,4 +5,5 @@ optuna-dashboard
 python-dotenv
 backtrader
 matplotlib
+pytest
 

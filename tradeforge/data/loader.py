@@ -4,6 +4,15 @@ import os
 from tradeforge.data.request import request_ohlc, request_indicator
 from tradeforge.data.cleanup import clear_external_files
 from tradeforge.config import Config
+from tradeforge.utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+def _require_columns(df: pd.DataFrame, expected: set[str]) -> None:
+    """Raise if any of `expected` columns are missing from `df`."""
+    missing = expected - set(df.columns)
+    if missing:
+        raise ValueError(f"CSV is missing required columns: {missing}")
 
 def load_ohlc(file_path: str) -> pd.DataFrame:
     """Load OHLC data from a CSV file.
@@ -15,10 +24,7 @@ def load_ohlc(file_path: str) -> pd.DataFrame:
         A DataFrame containing the OHLC data.
     """
     df = pd.read_csv(file_path)
-    expected = {"DateTime", "Open", "High", "Low", "Close", "Volume"}
-    missing = expected - set(df.columns)
-    if missing:
-        raise ValueError(f"CSV is missing required columns: {missing}")
+    _require_columns(df, {"DateTime", "Open", "High", "Low", "Close", "Volume"})
     return df
 
 def load_indicator(file_path:str, num_buffers: int, indicator_name: str | None) -> pd.DataFrame:
@@ -37,10 +43,7 @@ def load_indicator(file_path:str, num_buffers: int, indicator_name: str | None) 
             columns if indicator_name is provided.
     """
     df = pd.read_csv(file_path)
-    expected = {"DateTime"} | {f'Buffer_Value_{i}' for i in range(num_buffers)}
-    missing = expected - set(df.columns)
-    if missing:
-        raise ValueError(f"CSV is missing required columns: {missing}")
+    _require_columns(df, {"DateTime"} | {f'Buffer_Value_{i}' for i in range(num_buffers)})
     if indicator_name:
         buffer_rename = {f'Buffer_Value_{i}': f'{indicator_name}_Buffer_{i}' for i in range(num_buffers)}
         df.rename(columns=buffer_rename, inplace=True)
@@ -71,9 +74,27 @@ def merge_dataframes(main_df, *other_dfs):
         )
     return merged_df
 
+def _load_cached_currency_data(currencies: list[str], common_dir: str) -> dict[str, pd.DataFrame]:
+    """Load and merge locally-cached OHLC+ATR CSVs for each currency.
+
+    Assumes the CSVs already exist under `common_dir` (e.g. from a prior
+    request_ohlc/request_indicator call).
+    """
+    cached_data = {}
+    for currency in currencies:
+        ohlc_path = os.path.join(common_dir, f"{currency}_1440.csv")
+        data = load_ohlc(ohlc_path)
+
+        atr_path = os.path.join(common_dir, f"{currency}_ATR_1440_0.csv")
+        atr_df = load_indicator(atr_path, num_buffers=1, indicator_name="ATR")
+
+        cached_data[currency] = merge_dataframes(data, atr_df)
+    return cached_data
+
 def load_static_data(currencies: list[str]):
     """
-    Load static OHLC and ATR data for each currency.
+    Request fresh OHLC and ATR data from the MT4 EA and load it into merged
+    per-currency DataFrames.
 
     Args:
         currencies: Currency symbols to load.
@@ -81,21 +102,16 @@ def load_static_data(currencies: list[str]):
     Returns:
         A dictionary keyed by currency symbol containing the merged data frame.
     """
+    logger.debug(f"Requesting OHLC/ATR data for {len(currencies)} currencies from MT4 EA.")
     clear_external_files(Config.COMMON_DIR)
     if not request_ohlc(currencies):
+        logger.error(f"Failed to request OHLC data from MT4 EA for {currencies}.")
         raise RuntimeError("Failed to request OHLC data from MT4 EA.")
     if not request_indicator(currencies, parameters=14, indicator_name="ATR", buffer_values=0):
+        logger.error(f"Failed to request ATR indicator data from MT4 EA for {currencies}.")
         raise RuntimeError("Failed to request ATR indicator data from MT4 EA.")
-    cached_data = {}
-    for currency in currencies:
-        ohlc_path = os.path.join(Config.COMMON_DIR, f"{currency}_1440.csv")
-        data = load_ohlc(ohlc_path)
 
-        atr_path = os.path.join(Config.COMMON_DIR, f"{currency}_ATR_1440_0.csv")
-        atr_df = load_indicator(atr_path, num_buffers=1, indicator_name="ATR")
-
-        data = merge_dataframes(data, atr_df)
-
-        cached_data[currency] = data
+    cached_data = _load_cached_currency_data(currencies, Config.COMMON_DIR)
+    logger.debug(f"Loaded and merged static data for {len(cached_data)} currencies.")
     return cached_data
 

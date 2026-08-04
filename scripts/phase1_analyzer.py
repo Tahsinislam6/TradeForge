@@ -8,11 +8,11 @@ from tradeforge.config import Config
 from tradeforge.data.loader import load_static_data
 from tradeforge.data.request import request_indicator
 from tradeforge.data.zigzag import calculate_atr_zigzag
-from tradeforge.utils.display import format_metrics, parse_number, print_header
+from tradeforge.utils.display import parse_number
 
 
 def print_error(message: str):
-    print(f"✗ {message}")
+    print(f"Error: {message}")
     sys.exit(1)
 
 
@@ -44,7 +44,7 @@ def main():
         nargs="+",
         default=None,
         metavar="CURRENCY",
-        help=f"Currency pairs to test. Default: {' '.join(Config.CURRENCIES)}"
+        help=f"Currency pairs to test. Default: {' '.join(Config.IN_SAMPLE)}"
     )
     parser.add_argument(
         "--verbose",
@@ -56,15 +56,8 @@ def main():
 
     indicator_name = args.indicator.strip()
     parameters = args.parameters
-    currencies = args.currencies or Config.CURRENCIES
+    currencies = args.currencies or Config.IN_SAMPLE
 
-    # Print header
-    print_header("BASELINE QUALITY ANALYZER")
-    print(f"\n  Indicator:  {indicator_name}")
-    print(f"  Parameters: {parameters}")
-    print(f"  Currencies: {len(currencies)} ({', '.join(currencies[:3])}{'...' if len(currencies) > 3 else ''})")
-
-    print("\n  Loading data...")
     try:
         cached_data = load_static_data(currencies)
         cached_data = {
@@ -77,8 +70,6 @@ def main():
         print_error(f"Failed to load data: {e}")
         return
 
-    # Run analysis
-    print("\n  Starting analysis...")
     try:
         metrics = baseline_backtest(
             data=cached_data,
@@ -93,12 +84,7 @@ def main():
         print_error(f"Analysis failed: {e}")
         return
 
-    # Display results
-    print_header("RESULTS")
-    print(format_metrics(metrics))
-    print(f"\n  Result: {metrics}")
-
-    print("\n")
+    print(metrics)
 
 
 if __name__ == "__main__":

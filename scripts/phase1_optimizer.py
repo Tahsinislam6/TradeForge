@@ -1,6 +1,4 @@
 import argparse
-import csv
-import json
 import optuna
 import secrets
 from pathlib import Path
@@ -16,13 +14,13 @@ from tradeforge.backtest.candidates.param_space import (
     suggest_params,
 )
 from tradeforge.config import Config
+from tradeforge.data.cleanup import clear_external_files
 from tradeforge.data.loader import load_static_data
 from tradeforge.data.request import request_indicator
 from tradeforge.data.zigzag import calculate_atr_zigzag
 from tradeforge.utils.notification import send_notification
 
 FAILED_TRIAL_VALUE = 1e6
-BEST_TRIALS_CSV = Path(__file__).parent.parent / "baseline_best_trials.csv"
 
 
 
@@ -35,17 +33,20 @@ def get_constraint_violations(trial):
     snapshot passed to after_trial by Optuna's internal cache.
 
     Returns:
-        Tuple of (whipsaw_violation, distance_atr_violation, avg_bars_violation).
+        Tuple of (distance_atr_violation, avg_bars_violation,
+        distance_atr_std_violation, volatility_violation).
     """
-    whipsaw_frequency = trial.user_attrs.get("whipsaw_frequency")
     avg_bars_held = trial.user_attrs.get("avg_bars_held")
     distance_atr_ratio = trial.user_attrs.get("distance_atr_ratio")
-    if any(v is None for v in (whipsaw_frequency, avg_bars_held, distance_atr_ratio)):
-        return (FAILED_TRIAL_VALUE, FAILED_TRIAL_VALUE, FAILED_TRIAL_VALUE)
-    whipsaw_violation = max(0.0, whipsaw_frequency - Config.BASELINE_MAX_WHIPSAW_FREQUENCY)
+    distance_atr_std = trial.user_attrs.get("distance_atr_std")
+    volatility_ratio = trial.user_attrs.get("volatility_ratio")
+    if any(v is None for v in (avg_bars_held, distance_atr_ratio, distance_atr_std, volatility_ratio)):
+        return (FAILED_TRIAL_VALUE, FAILED_TRIAL_VALUE, FAILED_TRIAL_VALUE, FAILED_TRIAL_VALUE)
     distance_violation = max(0.0, distance_atr_ratio - Config.BASELINE_MAX_ATR_RATIO, Config.BASELINE_MIN_ATR_RATIO - distance_atr_ratio)
     avg_bars_violation = max(0.0, Config.BASELINE_MIN_AVG_BARS_HELD - avg_bars_held)
-    return (whipsaw_violation, distance_violation, avg_bars_violation)
+    distance_std_violation = max(0.0, distance_atr_std - Config.BASELINE_MAX_DISTANCE_ATR_STD)
+    volatility_violation = max(0.0, volatility_ratio - Config.BASELINE_MAX_VOLATILITY_RATIO)
+    return (distance_violation, avg_bars_violation, distance_std_violation, volatility_violation)
 
 
 def objective(trial: optuna.Trial, indicator_name: str, currencies: list, cached_data: dict, param_space: ParamSpace):
@@ -63,17 +64,21 @@ def objective(trial: optuna.Trial, indicator_name: str, currencies: list, cached
         )
     except Exception:
         raise optuna.exceptions.TrialPruned()
+    finally:
+        clear_external_files(Config.COMMON_DIR, f"*_{trial.number}.csv")
 
     trial.set_user_attr("distance_atr_ratio", metrics.distance_atr_ratio)
-    trial.set_user_attr("trend_capture", metrics.trend_capture)
+    trial.set_user_attr("distance_atr_std", metrics.distance_atr_std)
     trial.set_user_attr("whipsaw_frequency", metrics.whipsaw_frequency)
     trial.set_user_attr("avg_bars_held", metrics.avg_bars_held)
     trial.set_user_attr("capture_efficiency", metrics.capture_efficiency)
+    trial.set_user_attr("volatility_ratio", metrics.volatility_ratio)
 
     if metrics.whipsaw_frequency is None or metrics.capture_efficiency is None:
         raise optuna.exceptions.TrialPruned()
 
     return metrics.whipsaw_frequency, metrics.capture_efficiency
+
 
 
 def load_baseline_data(currencies: list[str]) -> dict:
@@ -101,8 +106,10 @@ def run_optimization(
     """Run an Optuna optimisation over one baseline candidate's parameters.
 
     With the default "nsga2" sampler this minimises whipsaw frequency and
-    maximises capture efficiency, enforcing hard constraints on whipsaw,
-    distance/ATR ratio, and average bars held — see BaselineCandidate.sampler
+    maximises capture efficiency, enforcing hard constraints on distance/ATR
+    ratio (mean and spread), average bars held, and the baseline's own
+    bar-to-bar volatility relative to ATR (catches unstable parameterizations
+    that oscillate independently of price) — see BaselineCandidate.sampler
     for the "grid" alternative and what it does/doesn't enforce. Results are
     persisted to a sqlite database at the project root, each run getting its
     own randomly-coded study name so repeated runs never collide or resume
@@ -117,14 +124,14 @@ def run_optimization(
             optional because "grid" candidates can derive their own count
             from the search space — "nsga2" candidates need one from here
             or from candidate.n_trials.
-        currencies: Currency pairs to test. Defaults to Config.CURRENCIES.
+        currencies: Currency pairs to test. Defaults to Config.IN_SAMPLE.
         cached_data: Pre-loaded static+ZigZag data from load_baseline_data.
             Loaded internally if omitted, so this still works standalone.
 
     Returns:
         The completed optuna.Study object.
     """
-    currencies = currencies or Config.CURRENCIES
+    currencies = currencies or Config.IN_SAMPLE
     if cached_data is None:
         cached_data = load_baseline_data(currencies)
 
@@ -162,57 +169,6 @@ def run_optimization(
     return study
 
 
-def export_best_trials(studies: list[optuna.Study], csv_path: Path = BEST_TRIALS_CSV) -> None:
-    """Write one row per Pareto-optimal trial from each study to csv_path,
-    creating it with a header on first write. Unlike Phase 2's
-    single-objective best_trial, this optimizer runs two objectives
-    (minimize whipsaw frequency, maximize capture efficiency), so a study
-    can have several non-dominated trade-offs worth keeping as candidates
-    instead of one winner — study.best_trials already restricts to the
-    feasible Pareto front for a constrained multi-objective study. A study
-    with no feasible trials falls back to the single completed trial with
-    the highest capture efficiency, flagged via the 'feasible' column so
-    it's still visible instead of the study being silently dropped. A study
-    with no completed trials at all is skipped."""
-    rows = []
-    for study in studies:
-        pareto_trials = study.best_trials
-        feasible = True
-        if not pareto_trials:
-            completed = study.get_trials(deepcopy=False, states=(optuna.trial.TrialState.COMPLETE,))
-            if not completed:
-                continue
-            pareto_trials = [max(completed, key=lambda t: t.values[1])]
-            feasible = False
-
-        indicator_name = study.user_attrs.get("indicator_name")
-        fixed_params = study.user_attrs.get("fixed_params")
-        for trial in pareto_trials:
-            rows.append({
-                "indicator_name": indicator_name,
-                "fixed_params": fixed_params or None,
-                "params": json.dumps(trial.params),
-                "whipsaw_frequency": trial.values[0],
-                "capture_efficiency": trial.values[1],
-                "avg_bars_held": trial.user_attrs.get("avg_bars_held"),
-                "distance_atr_ratio": trial.user_attrs.get("distance_atr_ratio"),
-                "trend_capture": trial.user_attrs.get("trend_capture"),
-                "feasible": feasible,
-                "date_completed": trial.datetime_complete.strftime("%d/%m/%Y") if trial.datetime_complete else None,
-                "study_name": study.study_name,
-            })
-
-    if not rows:
-        return
-
-    write_header = not csv_path.exists()
-    with open(csv_path, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-        if write_header:
-            writer.writeheader()
-        writer.writerows(rows)
-
-
 def run_all(
     currencies: list[str],
     n_trials: int | None = None,
@@ -222,20 +178,19 @@ def run_all(
     is the default trial count, used for any candidate that doesn't set its
     own BaselineCandidate.n_trials. A candidate that fails outright (e.g. a
     misspelled MT4 indicator name) is logged and skipped so it doesn't abort
-    the rest of the batch. Every completed study's Pareto-optimal trials are
-    appended to BEST_TRIALS_CSV once the whole batch is done."""
+    the rest of the batch."""
     cached_data = load_baseline_data(currencies)
 
-    completed, failed, studies = [], [], []
+    completed, failed = [], []
     for candidate in candidates:
         print(f"\n=== Baseline candidate: {candidate.name} ===")
         try:
-            studies.append(run_optimization(
+            run_optimization(
                 candidate,
                 n_trials=n_trials,
                 currencies=currencies,
                 cached_data=cached_data,
-            ))
+            )
         except Exception as e:
             print(f"[ERROR] {candidate.name} failed: {e}")
             failed.append(candidate.name)
@@ -243,7 +198,6 @@ def run_all(
 
         completed.append(candidate.name)
 
-    export_best_trials(studies)
     print(f"Baseline batch complete. Completed: {completed or 'none'}. Failed: {failed or 'none'}.")
 
 
@@ -277,20 +231,19 @@ if __name__ == "__main__":
                          help="Number of Optuna trials. Required for a one-off indicator_name run; otherwise "
                               "the default for any BASELINE_CANDIDATES entry that doesn't set its own n_trials.")
     parser.add_argument("--currencies", nargs="+", default=None, metavar="CURRENCY",
-                         help=f"Currency pairs to test. Default: {' '.join(Config.CURRENCIES)}")
+                         help=f"Currency pairs to test. Default: {' '.join(Config.IN_SAMPLE)}")
     parser.add_argument("--only", type=str, default=None,
                          help="Only sweep the BASELINE_CANDIDATES entry with this name "
                               "(case-insensitive). Ignored if indicator_name is given.")
     args = parser.parse_args()
 
-    currencies = args.currencies or Config.CURRENCIES
+    currencies = args.currencies or Config.IN_SAMPLE
 
     if args.indicator_name:
         if args.trials is None:
             raise SystemExit("trials is required for a one-off indicator_name run")
         candidate = BaselineCandidate(name=args.indicator_name, param_space=[IntParam(1, 100)], n_trials=args.trials)
-        study = run_optimization(candidate, currencies=currencies)
-        export_best_trials([study])
+        run_optimization(candidate, currencies=currencies)
     else:
         candidates = BASELINE_CANDIDATES
         if args.only:

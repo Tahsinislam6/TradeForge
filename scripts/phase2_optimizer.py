@@ -11,7 +11,7 @@ from functools import partial
 from scripts.run_backtest import run_backtest, request_and_load_many
 from tradeforge.backtest.algorithm import Phase2Strategy
 from tradeforge.backtest.candidates.c1_candidates import C1_CANDIDATES, C1Candidate
-from tradeforge.backtest.candidates.param_space import build_sampler, grid_trial_count, suggest_params
+from tradeforge.backtest.candidates.param_space import build_sampler, fixed_values, grid_trial_count, suggest_params
 from tradeforge.backtest.config import *
 from tradeforge.config import Config
 from tradeforge.data.cleanup import clear_external_files
@@ -26,7 +26,7 @@ MAX_DRAWDOWN = 60.0
 
 # ===== Parameters (edit these) =====
 # Fixed, already Phase-1-optimized baseline
-BASELINE = PriceCrossIndicator(name="GeoMin_MA", parameters=[48,3], buffer_values=[0], label="Baseline")
+BASELINE = PriceCrossIndicator(name="mcginley", parameters=[29,1,11,1], buffer_values=[0], label="Baseline")
 
 
 def get_constraint_violations(trial, min_trades: int, min_win_rate: float, min_avg_bars_held: float, max_drawdown: float):
@@ -237,7 +237,7 @@ def run_optimization(
     # types) don't collide on the same resumable study. A random code is
     # also prefixed so every run starts a fresh study instead of resuming
     # into a prior run's accumulated trials.
-    fixed_values = [spec.value for spec in c1_spec.param_space if isinstance(spec, FixedParam)]
+    fixed = fixed_values(c1_spec.param_space)
     run_code = secrets.token_hex(3)
     study_name = f"{run_code}_{c1_spec.name}_phase2_optimization"
     study = optuna.create_study(
@@ -253,7 +253,7 @@ def run_optimization(
     study.set_user_attr("buffer_values", c1_spec.buffer_values)
     study.set_user_attr("reverse", c1_spec.reverse)
     study.set_user_attr("cross_level", c1_spec.cross_level)
-    study.set_user_attr("fixed_params", fixed_values)
+    study.set_user_attr("fixed_params", fixed)
     study.set_user_attr("baseline_name", baseline.name)
     study.set_user_attr("baseline_parameters", baseline.parameters)
 
@@ -321,7 +321,7 @@ if __name__ == "__main__":
                               "(case-insensitive), instead of sweeping the whole list.")
     args = parser.parse_args()
 
-    currencies = [args.currency] if args.currency else Config.CURRENCIES
+    currencies = [args.currency] if args.currency else Config.IN_SAMPLE
 
     candidates = C1_CANDIDATES
     if args.only:

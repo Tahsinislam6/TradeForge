@@ -211,12 +211,12 @@ if __name__ == "__main__":
 
     # Phase 2 — portfolio backtest with multiple currencies
     summary = run_backtest(
-        currencies=Config.CURRENCIES,
+        currencies=Config.OUT_OF_SAMPLE,
         # currencies=["AUDNZD_SB"],
-        baseline=PriceCrossIndicator(name="Baseline", parameters=[49, 3, 9, 0], buffer_values=[0], label="Baseline"),
-        c1=TwoLineCrossIndicator(name="C1", parameters=[4,8,1, 2, 1, 3000, 0], buffer_values=[2,3], label="C1", reverse=False),
+        baseline=PriceCrossIndicator(name="mcginley", parameters=[49, 3, 9, 0], buffer_values=[0], label="Baseline"),
+        c1=TwoLineCrossIndicator(name="TOPTREND", parameters=[4,8,1, 2, 1, 3000, 0], buffer_values=[2,3], label="C1", reverse=False),
         strategy=Phase2Strategy,
-        plot=True,
+        plot=False,
     )
     print_summary(summary)
 
