@@ -56,7 +56,7 @@ def _build_sampler(c1_spec: C1Candidate) -> optuna.samplers.BaseSampler:
     ))
 
 
-def objective(trial: optuna.Trial, currencies: list[str], baseline: Indicator, cached_data: dict, c1_spec: C1Candidate, label: str = "C1"):
+def objective(trial: optuna.Trial, currencies: list[str], baseline: Indicator, cached_data: dict, c1_spec: C1Candidate, label: str = "C1", log_timing: bool = False):
     parameters = suggest_params(trial, c1_spec.param_space)
     c1_kwargs = dict(
         name=c1_spec.name,
@@ -79,6 +79,7 @@ def objective(trial: optuna.Trial, currencies: list[str], baseline: Indicator, c
             plot=False,
             cached_data=cached_data,
             print_results=False,
+            log_timing=log_timing,
         )
     except Exception:
         raise optuna.exceptions.TrialPruned()
@@ -124,30 +125,41 @@ BEST_TRIALS_CSV = Path(__file__).parent.parent / "phase2_best_trials.csv"
 def export_best_trials(studies: list[optuna.Study], csv_path: Path = BEST_TRIALS_CSV) -> None:
     """Write one row per study's best trial to csv_path, creating it with a
     header on first write. Everything comes off the study itself (name,
-    c1_name/etc. user_attrs set in run_optimization, best_trial's value/
+    c1_name/etc. user_attrs set in run_optimization, best trial's value/
     params/user_attrs) instead of anything tracked separately during the
     run, so this can just as well be pointed at studies loaded later from
     optuna.db. Params are dumped as JSON since each candidate's param_space
     has a different number of keys. A study with no completed trials at all
-    is logged and skipped. For constrained (nsga2) studies, best_trial only
-    considers trials that satisfy every constraint (Optuna excludes
-    infeasible ones); if none do, this falls back to the highest-scoring
-    completed trial regardless of feasibility and flags it via the
-    'feasible' column so it's still visible instead of the study being
-    silently dropped."""
+    is logged and skipped.
+
+    Feasibility is judged here directly from each trial's user_attrs against
+    MIN_TRADES/MIN_WIN_RATE/MIN_AVG_BARS_HELD/MAX_DRAWDOWN (the same
+    get_constraint_violations used to build nsga2's constraints_func),
+    instead of relying on study.best_trial. That matters because
+    GridSampler never calls constraints_func (see build_sampler), so it
+    never populates the system_attrs Optuna otherwise uses to tell a
+    constraint-violating trial apart from a good one -- study.best_trial
+    alone would happily return a grid trial that scored well but blew
+    through e.g. MAX_DRAWDOWN. Checking real thresholds here works
+    uniformly for both samplers. If no completed trial satisfies every
+    threshold, this falls back to the highest-scoring completed trial
+    regardless of feasibility and flags it via the 'feasible' column so
+    it's still visible instead of the study being silently dropped."""
     rows = []
     for study in studies:
-        feasible = True
-        try:
-            best = study.best_trial
-        except ValueError:
-            completed = study.get_trials(deepcopy=False, states=(optuna.trial.TrialState.COMPLETE,))
-            if not completed:
-                # print(f"[best] {study.study_name}: no completed trials")
-                continue
-            # print(f"[best] {study.study_name}: no feasible trial, falling back to best score (infeasible)")
-            best = max(completed, key=lambda t: t.value)
-            feasible = False
+        completed = study.get_trials(deepcopy=False, states=(optuna.trial.TrialState.COMPLETE,))
+        if not completed:
+            continue
+
+        feasible_trials = [
+            t for t in completed
+            if all(v <= 0 for v in get_constraint_violations(t, MIN_TRADES, MIN_WIN_RATE, MIN_AVG_BARS_HELD, MAX_DRAWDOWN))
+        ]
+        if feasible_trials:
+            best, feasible = max(feasible_trials, key=lambda t: t.value), True
+        else:
+            best, feasible = max(completed, key=lambda t: t.value), False
+
         rows.append({
             "baseline_name": study.user_attrs.get("baseline_name"),
             "baseline_parameters": study.user_attrs.get("baseline_parameters"),
@@ -162,8 +174,9 @@ def export_best_trials(studies: list[optuna.Study], csv_path: Path = BEST_TRIALS
             "avg_bars_held": best.user_attrs.get("avg_bars_held"),
             "max_drawdown": best.user_attrs.get("max_drawdown"),
             "score": best.value,
-            "date_completed": best.datetime_complete.strftime("%d/%m/%Y") if best.datetime_complete else None,                        
+            "date_completed": best.datetime_complete.strftime("%d/%m/%Y") if best.datetime_complete else None,
             "study_name": study.study_name,
+            "feasible": feasible,
         })
 
     if not rows:
@@ -184,6 +197,7 @@ def run_optimization(
     n_trials: int | None = None,
     cached_data: dict | None = None,
     label: str = "C1",
+    log_timing: bool = False,
 ) -> optuna.Study:
     """Run an Optuna optimisation over one C1 candidate's parameters.
 
@@ -259,7 +273,7 @@ def run_optimization(
 
 
     study.optimize(
-        lambda trial: objective(trial, currencies, baseline, cached_data, c1_spec, label),
+        lambda trial: objective(trial, currencies, baseline, cached_data, c1_spec, label, log_timing),
         n_trials=n_trials,
         show_progress_bar=False,
         gc_after_trial=True,
@@ -273,6 +287,7 @@ def run_all(
     baseline: Indicator,
     n_trials: int | None = None,
     candidates: list[C1Candidate] = C1_CANDIDATES,
+    log_timing: bool = False,
 ) -> None:
     """Sweep every candidate in `candidates` against the fixed `baseline`,
     one Optuna study each. `n_trials` is the default trial count, used for
@@ -293,6 +308,7 @@ def run_all(
                 c1_spec=c1_spec,
                 n_trials=n_trials,
                 cached_data=cached_data,
+                log_timing=log_timing,
             ))
         except Exception as e:
             print(f"[ERROR] {c1_spec.name} failed: {e}")
@@ -319,6 +335,9 @@ if __name__ == "__main__":
     parser.add_argument("--only", type=str, default=None,
                          help="Only test the C1_CANDIDATES entry with this name "
                               "(case-insensitive), instead of sweeping the whole list.")
+    parser.add_argument("--log-timing", action="store_true",
+                         help="Print per-trial data_load/backtest timing breakdown. "
+                              "Intended for a short diagnostic run (small --trials), not routine sweeps.")
     args = parser.parse_args()
 
     currencies = [args.currency] if args.currency else Config.IN_SAMPLE
@@ -330,4 +349,4 @@ if __name__ == "__main__":
             available = ", ".join(c.name for c in C1_CANDIDATES)
             raise SystemExit(f"No C1_CANDIDATES entry named '{args.only}'. Available: {available}")
 
-    run_all(currencies=currencies, baseline=BASELINE, n_trials=args.trials, candidates=candidates)
+    run_all(currencies=currencies, baseline=BASELINE, n_trials=args.trials, candidates=candidates, log_timing=args.log_timing)

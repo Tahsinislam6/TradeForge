@@ -42,6 +42,13 @@ class NNFXBaseStrategy(bt.Strategy):
     params = dict(
         baseline=None,
         atr_col="ATR_Buffer_0",
+        # Named plot_indicators, not "plot" -- bt.Strategy's built-in
+        # plotinfo already defines a "plot" field (controls chart
+        # visibility), and backtrader's metaclass silently intercepts any
+        # kwarg matching a plotinfo field name before it ever reaches
+        # params. A param literally named "plot" would always read back as
+        # backtrader's own default, never what's actually passed in here.
+        plot_indicators=False,
     )
 
     def __init__(self):
@@ -49,7 +56,7 @@ class NNFXBaseStrategy(bt.Strategy):
         self._state: dict[int, _DataState] = {}
         self.p.baseline.reset()
         for data in self.datas:
-            self.p.baseline.setup(self, data)
+            self.p.baseline.setup(self, data, plot=self.p.plot_indicators)
             atr = getattr(data.lines, self.p.atr_col)
             self._state[id(data)] = _TwoTradeDataState(atr)
 
@@ -264,5 +271,5 @@ class Phase2Strategy(NNFXBaseStrategy):
         super().__init__()
         self.p.c1.reset()
         for data in self.datas:
-            self.p.c1.setup(self, data)
+            self.p.c1.setup(self, data, plot=self.p.plot_indicators)
         self._indicators.append(self.p.c1)
