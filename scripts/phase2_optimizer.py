@@ -3,9 +3,12 @@ import csv
 import itertools
 import json
 import secrets
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import optuna
+from optuna.storages import JournalStorage
+from optuna.storages.journal import JournalFileBackend, JournalFileOpenLock
 from functools import partial
 
 from scripts.run_backtest import run_backtest, request_and_load_many
@@ -26,7 +29,7 @@ MAX_DRAWDOWN = 60.0
 
 # ===== Parameters (edit these) =====
 # Fixed, already Phase-1-optimized baseline
-BASELINE = PriceCrossIndicator(name="mcginley", parameters=[29,1,11,1], buffer_values=[0], label="Baseline")
+BASELINE = PriceCrossIndicator(name="alma-indicator", parameters=[97,18,0.1,3], buffer_values=[0], label="Baseline")
 
 
 def get_constraint_violations(trial, min_trades: int, min_win_rate: float, min_avg_bars_held: float, max_drawdown: float):
@@ -121,6 +124,23 @@ def load_baseline_cache(currencies: list[str], baseline: Indicator) -> dict:
 
 
 BEST_TRIALS_CSV = Path(__file__).parent.parent / "phase2_best_trials.csv"
+OPTUNA_JOURNAL_PATH = str(Path(__file__).parent.parent / "optuna_journal.log")
+# optuna-dashboard --storage-class JournalFileStorage optuna_journal.log
+
+
+def _journal_storage(path: str = OPTUNA_JOURNAL_PATH) -> JournalStorage:
+    """Build a fresh JournalStorage bound to `path`. Every caller -- the
+    parent process and each worker _run_parallel dispatches trials to --
+    must build its own instance here rather than share one: JournalStorage
+    coordinates concurrent writers through the lock file on disk, not
+    through shared Python state, and its open file handle/lock object
+    aren't safely picklable across the process boundary workers are
+    dispatched over anyway (unlike sqlite, which used a plain URL string
+    everywhere and had no such object to pass). JournalFileOpenLock is used
+    instead of the symlink-based default lock since creating symlinks needs
+    elevated privileges on Windows."""
+    return JournalStorage(JournalFileBackend(path, JournalFileOpenLock(path)))
+
 
 def export_best_trials(studies: list[optuna.Study], csv_path: Path = BEST_TRIALS_CSV) -> None:
     """Write one row per study's best trial to csv_path, creating it with a
@@ -128,7 +148,7 @@ def export_best_trials(studies: list[optuna.Study], csv_path: Path = BEST_TRIALS
     c1_name/etc. user_attrs set in run_optimization, best trial's value/
     params/user_attrs) instead of anything tracked separately during the
     run, so this can just as well be pointed at studies loaded later from
-    optuna.db. Params are dumped as JSON since each candidate's param_space
+    the journal storage. Params are dumped as JSON since each candidate's param_space
     has a different number of keys. A study with no completed trials at all
     is logged and skipped.
 
@@ -190,6 +210,65 @@ def export_best_trials(studies: list[optuna.Study], csv_path: Path = BEST_TRIALS
         writer.writerows(rows)
 
 
+def export_best_trials_from_db(storage: str = OPTUNA_JOURNAL_PATH, csv_path: Path = BEST_TRIALS_CSV) -> None:
+    """Recovery path for a run_all/run_optimization sweep that was killed
+    before it reached its own export_best_trials call (crash, Ctrl+C,
+    machine restart) -- Optuna persists every trial to storage as it
+    completes, independent of the Python process that's running it, so
+    nothing already-completed is actually lost. This reads every study
+    currently in the journal at `storage` back and hands the whole batch to
+    export_best_trials, exactly like run_all would have."""
+    journal_storage = _journal_storage(storage)
+    study_names = optuna.study.get_all_study_names(journal_storage)
+    studies = [optuna.load_study(study_name=name, storage=journal_storage) for name in study_names]
+    export_best_trials(studies, csv_path=csv_path)
+
+
+def _split_trial_counts(n_trials: int, n_jobs: int) -> list[int]:
+    """Split n_trials as evenly as possible across n_jobs workers, giving
+    the first `n_trials % n_jobs` workers one extra trial so every trial is
+    accounted for exactly once. A worker's count can be 0 when n_jobs
+    exceeds n_trials -- callers should drop those before dispatching."""
+    base, remainder = divmod(n_trials, n_jobs)
+    return [base + 1 if i < remainder else base for i in range(n_jobs)]
+
+
+def _run_worker_trials(study_name: str, journal_path: str, n_trials: int, currencies: list[str], baseline: Indicator, cached_data: dict, c1_spec: C1Candidate, label: str, log_timing: bool) -> None:
+    """Entry point for one worker process: load the study `run_optimization`
+    already created (by name, from the journal log at `journal_path`) and
+    run this worker's slice of trials against it. Runs in its own process,
+    so it can't close over anything from the parent -- every argument it
+    needs is passed in explicitly instead, and the JournalStorage handle is
+    built fresh here rather than received from the parent (see
+    _journal_storage)."""
+    study = optuna.load_study(study_name=study_name, storage=_journal_storage(journal_path))
+    study.optimize(
+        lambda trial: objective(trial, currencies, baseline, cached_data, c1_spec, label, log_timing),
+        n_trials=n_trials,
+        show_progress_bar=False,
+        gc_after_trial=True,
+    )
+
+
+def _run_parallel(study_name: str, journal_path: str, counts: list[int], currencies: list[str], baseline: Indicator, cached_data: dict, c1_spec: C1Candidate, label: str, log_timing: bool) -> None:
+    """Run one worker process per entry in `counts`, each running that many
+    trials against the same study. Coordination happens entirely through the
+    journal log at `journal_path` (every worker builds its own JournalStorage
+    bound to it) since separate processes don't share the in-memory Study
+    object -- that's also why the caller must reload the study from storage
+    afterward to see what the workers did."""
+    with ProcessPoolExecutor(max_workers=len(counts)) as executor:
+        futures = [
+            executor.submit(
+                _run_worker_trials, study_name, journal_path, count,
+                currencies, baseline, cached_data, c1_spec, label, log_timing,
+            )
+            for count in counts
+        ]
+        for future in futures:
+            future.result()
+
+
 def run_optimization(
     currencies: list[str],
     baseline: Indicator,
@@ -198,6 +277,7 @@ def run_optimization(
     cached_data: dict | None = None,
     label: str = "C1",
     log_timing: bool = False,
+    n_jobs: int = 1,
 ) -> optuna.Study:
     """Run an Optuna optimisation over one C1 candidate's parameters.
 
@@ -209,8 +289,8 @@ def run_optimization(
     (MIN_WIN_RATE), minimum average bars held (MIN_AVG_BARS_HELD), and
     maximum drawdown (MAX_DRAWDOWN) — see C1Candidate.sampler for the
     "grid" alternative and what it does/doesn't enforce.
-    Results are persisted to a sqlite database at the project root, each
-    run getting its own randomly-coded study name so repeated runs never
+    Results are persisted to a journal log at the project root, each run
+    getting its own randomly-coded study name so repeated runs never
     collide or resume into each other's trials.
 
     Args:
@@ -227,6 +307,12 @@ def run_optimization(
             or from c1_spec.n_trials.
         cached_data: Pre-loaded static+baseline data from load_baseline_cache.
             Loaded internally if omitted, so this still works standalone.
+        n_jobs: Number of worker processes to split n_trials across. Each
+            worker runs its own Cerebro backtests (the actual bottleneck --
+            see _run_worker_trials) and shares this study's trials through
+            the JournalStorage log at OPTUNA_JOURNAL_PATH. Default 1 runs
+            trials sequentially in-process, same as before this argument
+            existed.
 
     Returns:
         The completed optuna.Study object.
@@ -257,8 +343,7 @@ def run_optimization(
     study = optuna.create_study(
         direction="maximize",
         sampler=_build_sampler(c1_spec),
-        storage="sqlite:///" + str(Path(__file__).parent.parent / "optuna.db"),
-        # optuna-dashboard sqlite:///optuna.db
+        storage=_journal_storage(OPTUNA_JOURNAL_PATH),
         study_name=study_name,
         load_if_exists=True,
     )
@@ -271,13 +356,28 @@ def run_optimization(
     study.set_user_attr("baseline_name", baseline.name)
     study.set_user_attr("baseline_parameters", baseline.parameters)
 
-
-    study.optimize(
-        lambda trial: objective(trial, currencies, baseline, cached_data, c1_spec, label, log_timing),
-        n_trials=n_trials,
-        show_progress_bar=False,
-        gc_after_trial=True,
-    )
+    if n_jobs > 1:
+        # baseline is a long-lived Indicator reused by reference across every
+        # trial/candidate (see load_baseline_cache) -- its setup() stashes
+        # live backtrader Line/CrossOver objects on it, only cleared lazily
+        # by reset() the next time it's used (algorithm.py). If it was just
+        # used in-process, it's still dirty here, and those live backtrader
+        # objects can't be pickled across the process boundary below (they
+        # reference a dynamically-created class with no importable name).
+        baseline.reset()
+        counts = [c for c in _split_trial_counts(n_trials, n_jobs) if c > 0]
+        _run_parallel(study_name, OPTUNA_JOURNAL_PATH, counts, currencies, baseline, cached_data, c1_spec, label, log_timing)
+        # Workers ran in separate processes against their own Study handles,
+        # so this process's `study` object never saw their trials -- reload
+        # it from storage to get them.
+        study = optuna.load_study(study_name=study_name, storage=_journal_storage(OPTUNA_JOURNAL_PATH))
+    else:
+        study.optimize(
+            lambda trial: objective(trial, currencies, baseline, cached_data, c1_spec, label, log_timing),
+            n_trials=n_trials,
+            show_progress_bar=False,
+            gc_after_trial=True,
+        )
 
     return study
 
@@ -288,6 +388,7 @@ def run_all(
     n_trials: int | None = None,
     candidates: list[C1Candidate] = C1_CANDIDATES,
     log_timing: bool = False,
+    n_jobs: int = 1,
 ) -> None:
     """Sweep every candidate in `candidates` against the fixed `baseline`,
     one Optuna study each. `n_trials` is the default trial count, used for
@@ -309,6 +410,7 @@ def run_all(
                 n_trials=n_trials,
                 cached_data=cached_data,
                 log_timing=log_timing,
+                n_jobs=n_jobs,
             ))
         except Exception as e:
             print(f"[ERROR] {c1_spec.name} failed: {e}")
@@ -338,6 +440,11 @@ if __name__ == "__main__":
     parser.add_argument("--log-timing", action="store_true",
                          help="Print per-trial data_load/backtest timing breakdown. "
                               "Intended for a short diagnostic run (small --trials), not routine sweeps.")
+    parser.add_argument("--workers", type=int, default=1,
+                         help="Number of worker processes to split each candidate's trials "
+                              "across. Workers coordinate through the shared JournalStorage "
+                              "log, so this is safe to raise up to roughly your CPU core "
+                              "count. Default 1 (sequential, same as before this flag existed).")
     args = parser.parse_args()
 
     currencies = [args.currency] if args.currency else Config.IN_SAMPLE
@@ -349,4 +456,4 @@ if __name__ == "__main__":
             available = ", ".join(c.name for c in C1_CANDIDATES)
             raise SystemExit(f"No C1_CANDIDATES entry named '{args.only}'. Available: {available}")
 
-    run_all(currencies=currencies, baseline=BASELINE, n_trials=args.trials, candidates=candidates, log_timing=args.log_timing)
+    run_all(currencies=currencies, baseline=BASELINE, n_trials=args.trials, candidates=candidates, log_timing=args.log_timing, n_jobs=args.workers)

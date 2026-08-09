@@ -8,7 +8,11 @@ from optuna.trial import TrialState, create_trial
 from scripts.phase2_optimizer import (
     FAILED_TRIAL_VALUE,
     _build_sampler,
+    _journal_storage,
+    _run_worker_trials,
+    _split_trial_counts,
     export_best_trials,
+    export_best_trials_from_db,
     get_constraint_violations,
     load_baseline_cache,
     objective,
@@ -413,7 +417,253 @@ def test_export_best_trials_appends_without_duplicating_header(tmp_path):
     assert len(lines) == 3  # header + two rows, no repeated header
 
 
+# export_best_trials_from_db
+
+def test_export_best_trials_from_db_exports_every_study_found_in_storage(tmp_path):
+    """Recovery path: if a run_all sweep gets killed partway through (crash,
+    Ctrl+C, machine restart), it never reaches its own export_best_trials
+    call, but Optuna has already persisted every completed trial for every
+    study started so far to the journal storage. This reads storage directly
+    -- independent of whichever Python process wrote to it -- and exports
+    everything found, so nothing already-completed is lost."""
+    storage = str(tmp_path / "journal.log")
+
+    study_a = optuna.create_study(direction="maximize", storage=_journal_storage(storage), study_name="studyA")
+    study_a.set_user_attr("c1_name", "C1_A")
+    study_a.add_trial(_completed_trial(90.0, total_trades=250, win_rate=70.0))
+
+    study_b = optuna.create_study(direction="maximize", storage=_journal_storage(storage), study_name="studyB")
+    study_b.set_user_attr("c1_name", "C1_B")
+    study_b.add_trial(_completed_trial(60.0, total_trades=250, win_rate=70.0))
+
+    csv_path = tmp_path / "best.csv"
+
+    export_best_trials_from_db(storage=storage, csv_path=csv_path)
+
+    with open(csv_path, newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 2
+    by_name = {r["c1_name"]: r for r in rows}
+    assert by_name["C1_A"]["score"] == "90.0"
+    assert by_name["C1_B"]["score"] == "60.0"
+
+
+def test_export_best_trials_from_db_skips_studies_with_no_completed_trials(tmp_path):
+    storage = str(tmp_path / "journal.log")
+
+    started_but_empty = optuna.create_study(direction="maximize", storage=_journal_storage(storage), study_name="empty")
+    started_but_empty.set_user_attr("c1_name", "Empty")
+
+    finished = optuna.create_study(direction="maximize", storage=_journal_storage(storage), study_name="finished")
+    finished.set_user_attr("c1_name", "Finished")
+    finished.add_trial(_completed_trial(70.0, total_trades=250, win_rate=70.0))
+
+    csv_path = tmp_path / "best.csv"
+
+    export_best_trials_from_db(storage=storage, csv_path=csv_path)
+
+    with open(csv_path, newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 1
+    assert rows[0]["c1_name"] == "Finished"
+
+
+def test_export_best_trials_from_db_no_studies_at_all_writes_nothing(tmp_path):
+    storage = str(tmp_path / "journal.log")
+    _journal_storage(storage)  # creates an empty journal log with no studies
+    csv_path = tmp_path / "best.csv"
+
+    export_best_trials_from_db(storage=storage, csv_path=csv_path)
+
+    assert not csv_path.exists()
+
+
+# _split_trial_counts
+
+def test_split_trial_counts_single_job_returns_all_trials():
+    assert _split_trial_counts(10, 1) == [10]
+
+
+def test_split_trial_counts_even_split():
+    assert _split_trial_counts(9, 3) == [3, 3, 3]
+
+
+def test_split_trial_counts_remainder_goes_to_first_workers():
+    assert _split_trial_counts(10, 3) == [4, 3, 3]
+
+
+def test_split_trial_counts_more_jobs_than_trials_pads_with_zeros():
+    assert _split_trial_counts(2, 5) == [1, 1, 0, 0, 0]
+
+
+def test_split_trial_counts_always_sums_to_n_trials():
+    assert sum(_split_trial_counts(17, 4)) == 17
+
+
+# _journal_storage
+
+def test_journal_storage_two_instances_on_same_path_see_the_same_study(tmp_path):
+    """The whole point of switching to JournalStorage: separate instances
+    (standing in for separate processes, which can't share a live Python
+    storage object) built on the same path must coordinate through the file
+    on disk, not through shared state, so one instance's write is visible
+    to another's read."""
+    path = str(tmp_path / "journal.log")
+
+    study = optuna.create_study(direction="maximize", storage=_journal_storage(path), study_name="s")
+    study.add_trial(_completed_trial(1.0, total_trades=250, win_rate=70.0))
+
+    reloaded = optuna.load_study(study_name="s", storage=_journal_storage(path))
+    assert len(reloaded.trials) == 1
+
+
+# _run_worker_trials
+
+def test_run_worker_trials_loads_shared_study_and_runs_its_share(tmp_path, monkeypatch):
+    storage = str(tmp_path / "journal.log")
+    study_name = "worker_test_study"
+    optuna.create_study(direction="maximize", storage=_journal_storage(storage), study_name=study_name)
+    monkeypatch.setattr("scripts.phase2_optimizer.objective", lambda *a, **k: 1.0)
+    baseline = SimpleNamespace(name="Baseline", parameters=[1])
+
+    _run_worker_trials(
+        study_name, storage, 3, ["EURUSD_SB"], baseline, {}, _c1_candidate(), "C1", False,
+    )
+
+    study = optuna.load_study(study_name=study_name, storage=_journal_storage(storage))
+    assert len(study.trials) == 3
+
+
+def test_run_worker_trials_two_workers_on_same_path_share_one_study(tmp_path, monkeypatch):
+    """Simulates two worker processes: _run_parallel dispatches each worker
+    only a journal-log path (a plain string, safe to pickle), and each
+    worker builds its own JournalStorage from it internally (see
+    _run_worker_trials) since a live storage object/lock can't cross the
+    process boundary. Both workers' trials must land in the one study
+    instead of fragmenting into separate ones."""
+    storage = str(tmp_path / "journal.log")
+    study_name = "shared_study"
+    optuna.create_study(direction="maximize", storage=_journal_storage(storage), study_name=study_name)
+    monkeypatch.setattr("scripts.phase2_optimizer.objective", lambda *a, **k: 1.0)
+    baseline = SimpleNamespace(name="Baseline", parameters=[1])
+
+    _run_worker_trials(study_name, storage, 2, ["EURUSD_SB"], baseline, {}, _c1_candidate(), "C1", False)
+    _run_worker_trials(study_name, storage, 3, ["EURUSD_SB"], baseline, {}, _c1_candidate(), "C1", False)
+
+    study = optuna.load_study(study_name=study_name, storage=_journal_storage(storage))
+    assert len(study.trials) == 5
+
+
 # run_optimization / run_all
+
+def test_run_optimization_n_jobs_1_does_not_dispatch_workers(monkeypatch):
+    called = []
+    monkeypatch.setattr("scripts.phase2_optimizer._run_parallel", lambda *a, **k: called.append(1))
+    real_create_study = optuna.create_study
+    monkeypatch.setattr(
+        "scripts.phase2_optimizer.optuna.create_study",
+        lambda **kwargs: real_create_study(direction=kwargs["direction"], sampler=kwargs["sampler"]),
+    )
+    monkeypatch.setattr(
+        "scripts.phase2_optimizer.objective",
+        lambda trial, currencies, baseline, cached_data, c1_spec, label="C1", log_timing=False: 1.0,
+    )
+    baseline = SimpleNamespace(name="Baseline", parameters=[1])
+    candidate = _c1_candidate(sampler="grid", param_space=[IntParam(1, 3)])
+
+    study = run_optimization(["EURUSD_SB"], baseline, candidate, cached_data={}, n_jobs=1)
+
+    assert called == []
+    assert len(study.trials) == 3
+
+
+def test_run_optimization_n_jobs_dispatches_split_counts_and_reloads_study(tmp_path, monkeypatch):
+    storage = str(tmp_path / "journal.log")
+    monkeypatch.setattr("scripts.phase2_optimizer.OPTUNA_JOURNAL_PATH", storage)
+    captured = {}
+
+    def fake_run_parallel(study_name, journal_path, counts, currencies, baseline, cached_data, c1_spec, label, log_timing):
+        captured["counts"] = counts
+        # Simulate workers completing trials against the shared storage --
+        # the real _run_parallel does this out-of-process, but the parent's
+        # job is just to reload afterward, which is what this test checks.
+        study = optuna.load_study(study_name=study_name, storage=_journal_storage(journal_path))
+        for _ in range(sum(counts)):
+            study.add_trial(create_trial(state=TrialState.COMPLETE, value=1.0, params={}))
+
+    monkeypatch.setattr("scripts.phase2_optimizer._run_parallel", fake_run_parallel)
+    baseline = SimpleNamespace(name="Baseline", parameters=[1], reset=lambda: None)
+    candidate = _c1_candidate(sampler="grid", param_space=[IntParam(1, 5)])  # 5 combinations
+
+    study = run_optimization(["EURUSD_SB"], baseline, candidate, cached_data={}, n_jobs=2)
+
+    assert sum(captured["counts"]) == 5
+    assert len(captured["counts"]) == 2
+    assert len(study.trials) == 5
+
+
+def test_run_optimization_n_jobs_exceeding_trials_drops_empty_workers(tmp_path, monkeypatch):
+    storage = str(tmp_path / "journal.log")
+    monkeypatch.setattr("scripts.phase2_optimizer.OPTUNA_JOURNAL_PATH", storage)
+    captured = {}
+    monkeypatch.setattr(
+        "scripts.phase2_optimizer._run_parallel",
+        lambda study_name, storage_, counts, *a, **k: captured.update(counts=counts),
+    )
+    baseline = SimpleNamespace(name="Baseline", parameters=[1], reset=lambda: None)
+    candidate = _c1_candidate(sampler="nsga2", param_space=[IntParam(1, 5)], n_trials=2)
+
+    run_optimization(["EURUSD_SB"], baseline, candidate, cached_data={}, n_jobs=5)
+
+    # n_trials=2 split across 5 workers -> [1, 1, 0, 0, 0]; zero-trial
+    # workers must be dropped instead of spawning idle worker processes.
+    assert captured["counts"] == [1, 1]
+
+
+def test_run_optimization_n_jobs_resets_baseline_before_dispatch(tmp_path, monkeypatch):
+    """baseline is a long-lived Indicator reused by reference across trials
+    (see load_baseline_cache) -- its setup() stashes live backtrader Line/
+    CrossOver objects on it (algorithm.py), only cleared lazily by reset() on
+    next use. If it was used in-process just before this call, it's still
+    dirty at dispatch time, and pickling those live backtrader objects to
+    ship to worker processes crashes (they reference a dynamically-created,
+    non-module-level-nameable class). run_optimization must reset it first."""
+    storage = str(tmp_path / "journal.log")
+    monkeypatch.setattr("scripts.phase2_optimizer.OPTUNA_JOURNAL_PATH", storage)
+    reset_calls = []
+
+    def fake_run_parallel(study_name, journal_path, counts, currencies, baseline, cached_data, c1_spec, label, log_timing):
+        assert reset_calls, "baseline.reset() must be called before dispatching to workers"
+        study = optuna.load_study(study_name=study_name, storage=_journal_storage(journal_path))
+        for _ in range(sum(counts)):
+            study.add_trial(create_trial(state=TrialState.COMPLETE, value=1.0, params={}))
+
+    monkeypatch.setattr("scripts.phase2_optimizer._run_parallel", fake_run_parallel)
+    baseline = SimpleNamespace(name="Baseline", parameters=[1], reset=lambda: reset_calls.append(1))
+    candidate = _c1_candidate(sampler="grid", param_space=[IntParam(1, 3)])
+
+    run_optimization(["EURUSD_SB"], baseline, candidate, cached_data={}, n_jobs=2)
+
+    assert reset_calls == [1]
+
+
+def test_run_all_forwards_n_jobs_to_run_optimization(monkeypatch):
+    monkeypatch.setattr("scripts.phase2_optimizer.load_baseline_cache", lambda currencies, baseline: {})
+    monkeypatch.setattr("scripts.phase2_optimizer.export_best_trials", lambda studies: None)
+    monkeypatch.setattr("scripts.phase2_optimizer.send_notification", lambda message: None)
+    captured = {}
+
+    def fake_run_optimization(currencies, baseline, c1_spec, n_trials=None, cached_data=None, log_timing=False, n_jobs=1):
+        captured["n_jobs"] = n_jobs
+        return optuna.create_study()
+
+    monkeypatch.setattr("scripts.phase2_optimizer.run_optimization", fake_run_optimization)
+    candidates = [_c1_candidate(sampler="grid")]
+
+    run_all(currencies=["EURUSD_SB"], baseline=SimpleNamespace(name="Baseline"), candidates=candidates, n_jobs=4)
+
+    assert captured["n_jobs"] == 4
+
 
 def test_run_optimization_uses_derived_trial_count_for_grid_sampler(monkeypatch):
     captured = {}
@@ -452,7 +702,7 @@ def test_run_all_collects_completed_and_failed_candidates(monkeypatch, capsys):
     monkeypatch.setattr("scripts.phase2_optimizer.export_best_trials", lambda studies: None)
     monkeypatch.setattr("scripts.phase2_optimizer.send_notification", lambda message: None)
 
-    def fake_run_optimization(currencies, baseline, c1_spec, n_trials=None, cached_data=None, log_timing=False):
+    def fake_run_optimization(currencies, baseline, c1_spec, n_trials=None, cached_data=None, log_timing=False, n_jobs=1):
         if c1_spec.name == "bad":
             raise RuntimeError("boom")
         return optuna.create_study()

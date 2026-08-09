@@ -13,5 +13,6 @@ venv/
 .env
 .env.local
 *.env
+*.ps1
 tradeforge/backtest/candidates
 # If you want to allow specific CSVs, use ! (uncomment and edit as needed)
