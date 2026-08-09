@@ -3,7 +3,30 @@ from tradeforge.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-client = MT4Client()
+_client: MT4Client | None = None
+
+
+def _get_client() -> MT4Client:
+    """Lazily construct the module's MT4Client on first real use.
+
+    Importing this module must not itself open a socket to MT4 -- every
+    other module that just wants request_indicator/request_ohlc (scripts,
+    loaders, etc.) imports this file too, so a module-level MT4Client()
+    used to mean a real, unbounded-timeout connection attempt on every one
+    of those imports."""
+    global _client
+    if _client is None:
+        _client = MT4Client()
+    return _client
+
+
+def __getattr__(name):
+    # Back-compat for callers/tests that access `request.client` directly
+    # (e.g. to monkeypatch client.send_request) -- resolves through the
+    # same lazy singleton as _get_client().
+    if name == "client":
+        return _get_client()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _as_list(value):
@@ -21,7 +44,7 @@ def request_ohlc(currencies: list[str], timeframe: str = "PERIOD_D1"):
     Returns:
         True if the request succeeds, otherwise False.
     """
-    response = client.send_request({
+    response = _get_client().send_request({
         "command": "OHLC",
         "symbols": currencies,
         "timeframe": timeframe})
@@ -46,7 +69,7 @@ def request_indicator(currencies: list[str], parameters, indicator_name: str, bu
     Returns:
         True if the request succeeds, otherwise False.
     """
-    response = client.send_request({
+    response = _get_client().send_request({
         "command": "INDICATOR",
         "symbols": currencies,
         "timeframe": timeframe,

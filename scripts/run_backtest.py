@@ -1,6 +1,7 @@
 """Backtest a baseline indicator on a single currency pair."""
 
 import os
+import time
 
 import backtrader as bt
 
@@ -90,7 +91,7 @@ def _run_cerebro(currencies, dfs_by_currency, indicator_cols, strategy, strategy
         feed = make_bt_feed(dfs_by_currency[currency], indicator_cols=indicator_cols)
         cerebro.adddata(feed, name=currency)
 
-    cerebro.addstrategy(strategy, **strategy_kwargs)
+    cerebro.addstrategy(strategy, plot_indicators=plot, **strategy_kwargs)
     cerebro.broker.setcash(initial_cash)
     cerebro.broker.setcommission(margin=1/30, mult=1.0)
     cerebro.broker.set_slippage_perc(0.001)
@@ -146,6 +147,7 @@ def run_backtest(
     plot: bool = False,
     cached_data: dict | None = None,
     print_results: bool = True,
+    log_timing: bool = False,
 ) -> dict:
     """Backtest a baseline (+ optional C1) strategy on one or more currency
     pairs in a single Cerebro run, sharing one portfolio equity/risk budget.
@@ -156,9 +158,17 @@ def run_backtest(
             every call, e.g. across optimizer trials. Loaded internally if omitted.
         print_results: Whether to print per-currency data range info. Set to
             False to silence output during optimizer trials.
+        log_timing: Print how long data loading (MT4 request/read) vs. the
+            Cerebro run took. Meant for a one-off diagnostic run to see where
+            optimizer trial time actually goes, not for routine sweeps.
     """
+    t0 = time.perf_counter()
     indicator_cols, strategy_kwargs, dfs_by_currency = _load_currency_data(currencies, baseline, c1, trial, cached_data, print_results)
+    t1 = time.perf_counter()
     cerebro, strat = _run_cerebro(currencies, dfs_by_currency, indicator_cols, strategy, strategy_kwargs, initial_cash, plot)
+    t2 = time.perf_counter()
+    if log_timing:
+        print(f"[timing]   data_load={t1 - t0:.3f}s  backtest={t2 - t1:.3f}s  total={t2 - t0:.3f}s")
     del dfs_by_currency
     summary = _build_summary(strat, cerebro, baseline, initial_cash)
     del cerebro, strat
@@ -198,7 +208,7 @@ if __name__ == "__main__":
     # )
 
     # Phase 2 — baseline + C1
-    
+
     # summary = run_backtest(
     #     currencies=["EURUSD_SB"],
     #     baseline=PriceCrossIndicator(name="SineWMA", parameters=[77, 5], buffer_values=[0], label="Baseline"),
@@ -207,16 +217,30 @@ if __name__ == "__main__":
     #     plot=True,
     # )
     # print_summary(summary)
-    
+
 
     # Phase 2 — portfolio backtest with multiple currencies
+    # summary = run_backtest(
+    #     currencies=Config.OUT_OF_SAMPLE,
+    #     # currencies=["AUDNZD_SB"],
+    #     baseline=PriceCrossIndicator(name="mcginley", parameters=[49, 3, 9, 0], buffer_values=[0], label="Baseline"),
+    #     c1=TwoLineCrossIndicator(name="TOPTREND", parameters=[4,8,1, 2, 1, 3000, 0], buffer_values=[2,3], label="C1", reverse=False),
+    #     strategy=Phase2Strategy,
+    #     plot=False,
+    # )
+    # print_summary(summary)
+
+    # Reproduce the phase2_optimizer SuperTrend sweep at full portfolio scale
+    # (Config.IN_SAMPLE, 10 currencies -- the default when --only is passed
+    # without a positional currency) to profile the order/broker overhead at
+    # the same scale where backtest time was 2.3-3s/trial.
     summary = run_backtest(
-        currencies=Config.OUT_OF_SAMPLE,
-        # currencies=["AUDNZD_SB"],
-        baseline=PriceCrossIndicator(name="mcginley", parameters=[49, 3, 9, 0], buffer_values=[0], label="Baseline"),
-        c1=TwoLineCrossIndicator(name="TOPTREND", parameters=[4,8,1, 2, 1, 3000, 0], buffer_values=[2,3], label="C1", reverse=False),
+        currencies=Config.IN_SAMPLE,
+        baseline=PriceCrossIndicator(name="mcginley", parameters=[29, 1, 11, 1], buffer_values=[0], label="Baseline"),
+        c1=TwoLineCrossIndicator(name="SuperTrend", parameters=[116, 3], buffer_values=[1, 0], label="C1", reverse=False),
         strategy=Phase2Strategy,
         plot=False,
+        log_timing=True,
     )
     print_summary(summary)
 

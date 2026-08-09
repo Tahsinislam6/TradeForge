@@ -33,9 +33,12 @@ class Indicator(ABC):
         ...
 
     @abstractmethod
-    def setup(self, strategy, data) -> None:
+    def setup(self, strategy, data, plot: bool = False) -> None:
         """Wire up bt indicators against a specific data feed. Must be called
-        once per data feed inside strategy __init__."""
+        once per data feed inside strategy __init__. plot=True also builds
+        the purely-cosmetic *Plot helper indicator (line naming/coloring for
+        cerebro.plot()) -- skipped by default since optimizer trials never
+        plot, and it's real per-bar Indicator work otherwise wasted."""
         ...
 
     @abstractmethod
@@ -108,7 +111,7 @@ class PriceCrossIndicator(Indicator):
         self._cross = {}
         self._close = {}
 
-    def setup(self, strategy, data) -> None:
+    def setup(self, strategy, data, plot: bool = False) -> None:
         key = id(data)
         line = getattr(data.lines, f"{self.label}_Buffer_0")
         cross = bt.indicators.CrossOver(data.close, line)
@@ -116,7 +119,8 @@ class PriceCrossIndicator(Indicator):
         self._line[key] = line
         self._cross[key] = cross
         self._close[key] = data.close
-        _BaselinePlot(line)
+        if plot:
+            _BaselinePlot(line)
 
     def reset(self) -> None:
         self._line.clear()
@@ -148,14 +152,15 @@ class LineCrossIndicator(Indicator):
         self._line = {}
         self._cross = {}
 
-    def setup(self, strategy, data) -> None:
+    def setup(self, strategy, data, plot: bool = False) -> None:
         key = id(data)
         line = getattr(data.lines, f"{self.label}_Buffer_0")
         cross = bt.indicators.CrossOver(line, self.cross_level)
         cross.plotinfo.plot = False
         self._line[key] = line
         self._cross[key] = cross
-        _LineCrossPlot(line, cross_level=self.cross_level)
+        if plot:
+            _LineCrossPlot(line, cross_level=self.cross_level)
 
     def reset(self) -> None:
         self._line.clear()
@@ -186,7 +191,7 @@ class TwoLineCrossIndicator(Indicator):
         self._slow = {}
         self._cross = {}
 
-    def setup(self, strategy, data) -> None:
+    def setup(self, strategy, data, plot: bool = False) -> None:
         key = id(data)
         fast = getattr(data.lines, f"{self.label}_Buffer_0")
         slow = getattr(data.lines, f"{self.label}_Buffer_1")
@@ -195,7 +200,8 @@ class TwoLineCrossIndicator(Indicator):
         self._fast[key] = fast
         self._slow[key] = slow
         self._cross[key] = cross
-        _TwoLinePlot(fast, slow)
+        if plot:
+            _TwoLinePlot(fast, slow)
 
     def reset(self) -> None:
         self._fast.clear()

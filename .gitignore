@@ -5,6 +5,7 @@
 *.db
 __pycache__/
 .pytest_cache/
+.coverage
 venv/
 .python-version
 *.log
@@ -12,5 +13,6 @@ venv/
 .env
 .env.local
 *.env
+*.ps1
 tradeforge/backtest/candidates
 # If you want to allow specific CSVs, use ! (uncomment and edit as needed)

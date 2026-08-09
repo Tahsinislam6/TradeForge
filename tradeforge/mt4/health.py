@@ -1,5 +1,5 @@
 import zmq
-from client import MT4Client
+from tradeforge.mt4.client import MT4Client
 
 def ping_mt4(timeout_ms=3000):
     """Return True when MT4 EA is reachable and replying to PING."""
