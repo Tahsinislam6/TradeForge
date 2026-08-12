@@ -124,6 +124,72 @@ def test_load_currency_data_with_c1_requests_both_indicators_and_extends_kwargs(
     assert dfs_by_currency["EURUSD_SB"]["C1_Buffer_0"].tolist() == [0.5]
 
 
+def test_load_currency_data_skips_request_when_c1_already_cached(monkeypatch):
+    """Phase 3 sweeps hold both baseline and C1 fixed (merged into
+    cached_data by load_phase3_cache) -- c1 must be skippable the same way
+    baseline already is, or every Phase 3 trial would needlessly re-request
+    a C1 that never changes across the sweep."""
+    baseline = _indicator(name="Baseline", col_names=["Baseline_Buffer_0"])
+    c1 = _indicator(name="C1", col_names=["C1_Buffer_0"])
+    cached_data = {
+        "EURUSD_SB": _ohlc_df(["2024.01.01 00:00"])
+        .assign(Baseline_Buffer_0=[1.5])
+        .assign(C1_Buffer_0=[0.7])
+    }
+    called = []
+    monkeypatch.setattr(
+        "scripts.run_backtest.request_and_load_many",
+        lambda *a, **k: called.append(1) or {},
+    )
+
+    indicator_cols, strategy_kwargs, dfs_by_currency = _load_currency_data(
+        ["EURUSD_SB"], baseline, c1, trial=0, cached_data=cached_data, print_results=False,
+    )
+
+    assert called == []
+    assert indicator_cols == ["Baseline_Buffer_0", "ATR_Buffer_0", "C1_Buffer_0"]
+    assert dfs_by_currency["EURUSD_SB"]["C1_Buffer_0"].tolist() == [0.7]
+
+
+def test_load_currency_data_with_exit_indicator_requests_it_and_extends_kwargs(monkeypatch):
+    baseline = _indicator(name="Baseline", col_names=["Baseline_Buffer_0"])
+    c1 = _indicator(name="C1", col_names=["C1_Buffer_0"])
+    exit_indicator = _indicator(name="Exit", col_names=["Exit_Buffer_0"])
+    cached_data = {
+        "EURUSD_SB": _ohlc_df(["2024.01.01 00:00"])
+        .assign(Baseline_Buffer_0=[1.5])
+        .assign(C1_Buffer_0=[0.7])
+    }
+    requested_for = []
+
+    def fake_request(currencies, indicator, trial):
+        requested_for.append(indicator.name)
+        return {"EURUSD_SB": pd.DataFrame({"DateTime": ["2024.01.01 00:00"], "Exit_Buffer_0": [0.3]})}
+
+    monkeypatch.setattr("scripts.run_backtest.request_and_load_many", fake_request)
+
+    indicator_cols, strategy_kwargs, dfs_by_currency = _load_currency_data(
+        ["EURUSD_SB"], baseline, c1, trial=0, cached_data=cached_data, print_results=False,
+        exit_indicator=exit_indicator,
+    )
+
+    assert requested_for == ["Exit"]  # baseline+c1 cached, only exit_indicator requested
+    assert indicator_cols == ["Baseline_Buffer_0", "ATR_Buffer_0", "C1_Buffer_0", "Exit_Buffer_0"]
+    assert strategy_kwargs == {"baseline": baseline, "c1": c1, "exit_indicator": exit_indicator}
+    assert dfs_by_currency["EURUSD_SB"]["Exit_Buffer_0"].tolist() == [0.3]
+
+
+def test_load_currency_data_without_exit_indicator_omits_it_from_kwargs():
+    baseline = _indicator(name="Baseline", col_names=["Baseline_Buffer_0"])
+    cached_data = {"EURUSD_SB": _ohlc_df(["2024.01.01 00:00"]).assign(Baseline_Buffer_0=[1.5])}
+
+    _, strategy_kwargs, _ = _load_currency_data(
+        ["EURUSD_SB"], baseline, None, trial=0, cached_data=cached_data, print_results=False,
+    )
+
+    assert "exit_indicator" not in strategy_kwargs
+
+
 def test_load_currency_data_print_results_true_prints_data_range(capsys):
     baseline = _indicator(name="Baseline", col_names=["Baseline_Buffer_0"])
     cached_data = {
@@ -261,14 +327,65 @@ def test_build_summary_defaults_missing_analyzer_keys():
     assert summary["max_drawdown"] == 0.0
 
 
+def test_build_summary_derives_avg_loss_and_avg_win():
+    paired = {
+        "total": 5, "won": 3, "lost": 2, "win_rate": 60.0,
+        "avg_bars_held": 4.0, "min_bars_held": 1, "max_bars_held": 10,
+        "gross_profit": 90.0, "gross_loss": -40.0, "profit_factor": 2.25,
+    }
+    strat = _fake_strat(paired)
+    cerebro = _fake_cerebro(10_050.0)
+    baseline = SimpleNamespace(name="MyBaseline")
+
+    summary = _build_summary(strat, cerebro, baseline, initial_cash=10_000.0)
+
+    assert summary["gross_profit"] == pytest.approx(90.0)
+    assert summary["gross_loss"] == pytest.approx(-40.0)
+    assert summary["avg_win"] == pytest.approx(30.0)
+    assert summary["avg_loss"] == pytest.approx(-20.0)
+
+
+def test_build_summary_carries_exit_reason_metrics_through():
+    paired = {
+        "total": 5, "won": 3, "lost": 2, "win_rate": 60.0,
+        "avg_bars_held": 4.0, "min_bars_held": 1, "max_bars_held": 10,
+        "gross_profit": 90.0, "gross_loss": -40.0, "profit_factor": 2.25,
+        "pct_winners_closed_early": 25.0, "avg_loss_by_reason": {"stop_loss": -20.0},
+    }
+    strat = _fake_strat(paired)
+    cerebro = _fake_cerebro(10_050.0)
+    baseline = SimpleNamespace(name="MyBaseline")
+
+    summary = _build_summary(strat, cerebro, baseline, initial_cash=10_000.0)
+
+    assert summary["pct_winners_closed_early"] == pytest.approx(25.0)
+    assert summary["avg_loss_by_reason"] == {"stop_loss": -20.0}
+
+
+def test_build_summary_zero_lost_or_won_gives_zero_avg():
+    paired = {
+        "total": 3, "won": 3, "lost": 0, "win_rate": 100.0,
+        "avg_bars_held": 4.0, "min_bars_held": 1, "max_bars_held": 10,
+        "gross_profit": 60.0, "gross_loss": 0.0, "profit_factor": float("inf"),
+    }
+    strat = _fake_strat(paired)
+    cerebro = _fake_cerebro(10_060.0)
+    baseline = SimpleNamespace(name="MyBaseline")
+
+    summary = _build_summary(strat, cerebro, baseline, initial_cash=10_000.0)
+
+    assert summary["avg_loss"] == 0.0
+    assert summary["avg_win"] == pytest.approx(20.0)
+
+
 # run_backtest (orchestration)
 
 def test_run_backtest_wires_helpers_and_merges_currencies_into_result(monkeypatch):
     sentinel_summary = {"baseline": "B", "final_value": 1.0}
     calls = {}
 
-    def fake_load(currencies, baseline, c1, trial, cached_data, print_results):
-        calls["load"] = (currencies, baseline, c1, trial, cached_data, print_results)
+    def fake_load(currencies, baseline, c1, trial, cached_data, print_results, exit_indicator=None):
+        calls["load"] = (currencies, baseline, c1, trial, cached_data, print_results, exit_indicator)
         return (["Baseline_Buffer_0"], {"baseline": baseline}, {"EURUSD_SB": "df"})
 
     def fake_run_cerebro(currencies, dfs_by_currency, indicator_cols, strategy, strategy_kwargs, initial_cash, plot):
@@ -287,10 +404,26 @@ def test_run_backtest_wires_helpers_and_merges_currencies_into_result(monkeypatc
     result = run_backtest(["EURUSD_SB"], baseline, trial=2, initial_cash=5_000.0, print_results=False)
 
     assert result == {"currencies": ["EURUSD_SB"], **sentinel_summary}
-    assert calls["load"] == (["EURUSD_SB"], baseline, None, 2, None, False)
+    assert calls["load"] == (["EURUSD_SB"], baseline, None, 2, None, False, None)
     assert calls["cerebro"][5] == 5_000.0
     assert calls["cerebro"][6] is False
     assert calls["summary"] == ("strat-obj", "cerebro-obj", baseline, 5_000.0)
+
+
+def test_run_backtest_forwards_exit_indicator_to_load_currency_data(monkeypatch):
+    calls = {}
+    monkeypatch.setattr(
+        "scripts.run_backtest._load_currency_data",
+        lambda currencies, baseline, c1, trial, cached_data, print_results, exit_indicator=None:
+            calls.update(exit_indicator=exit_indicator) or ([], {}, {}),
+    )
+    monkeypatch.setattr("scripts.run_backtest._run_cerebro", lambda *a, **k: ("cerebro-obj", "strat-obj"))
+    monkeypatch.setattr("scripts.run_backtest._build_summary", lambda *a, **k: {})
+
+    exit_indicator = SimpleNamespace(name="Exit")
+    run_backtest(["EURUSD_SB"], SimpleNamespace(name="Baseline"), exit_indicator=exit_indicator, print_results=False)
+
+    assert calls["exit_indicator"] is exit_indicator
 
 
 # print_summary

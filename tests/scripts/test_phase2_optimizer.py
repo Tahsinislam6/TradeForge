@@ -601,7 +601,7 @@ def test_run_optimization_n_jobs_dispatches_split_counts_and_reloads_study(tmp_p
     assert len(captured["counts"]) == 2
     assert len(study.trials) == 5
 
-
+@pytest.mark.filterwarnings("ignore::optuna.exceptions.ExperimentalWarning")
 def test_run_optimization_n_jobs_exceeding_trials_drops_empty_workers(tmp_path, monkeypatch):
     storage = str(tmp_path / "journal.log")
     monkeypatch.setattr("scripts.phase2_optimizer.OPTUNA_JOURNAL_PATH", storage)

@@ -1,14 +1,10 @@
 import argparse
 import csv
-import itertools
 import json
 import secrets
-from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import optuna
-from optuna.storages import JournalStorage
-from optuna.storages.journal import JournalFileBackend, JournalFileOpenLock
 from functools import partial
 
 from scripts.run_backtest import run_backtest, request_and_load_many
@@ -16,6 +12,13 @@ from tradeforge.backtest.algorithm import Phase2Strategy
 from tradeforge.backtest.candidates.c1_candidates import C1_CANDIDATES, C1Candidate
 from tradeforge.backtest.candidates.param_space import build_sampler, fixed_values, grid_trial_count, suggest_params
 from tradeforge.backtest.config import *
+from tradeforge.backtest.optuna_journal import (
+    journal_storage as _journal_storage,
+    load_all_studies,
+    run_parallel,
+    run_worker_trials,
+    split_trial_counts as _split_trial_counts,
+)
 from tradeforge.config import Config
 from tradeforge.data.cleanup import clear_external_files
 from tradeforge.data.loader import load_static_data, merge_dataframes
@@ -128,20 +131,6 @@ OPTUNA_JOURNAL_PATH = str(Path(__file__).parent.parent / "optuna_journal.log")
 # optuna-dashboard --storage-class JournalFileStorage optuna_journal.log
 
 
-def _journal_storage(path: str = OPTUNA_JOURNAL_PATH) -> JournalStorage:
-    """Build a fresh JournalStorage bound to `path`. Every caller -- the
-    parent process and each worker _run_parallel dispatches trials to --
-    must build its own instance here rather than share one: JournalStorage
-    coordinates concurrent writers through the lock file on disk, not
-    through shared Python state, and its open file handle/lock object
-    aren't safely picklable across the process boundary workers are
-    dispatched over anyway (unlike sqlite, which used a plain URL string
-    everywhere and had no such object to pass). JournalFileOpenLock is used
-    instead of the symlink-based default lock since creating symlinks needs
-    elevated privileges on Windows."""
-    return JournalStorage(JournalFileBackend(path, JournalFileOpenLock(path)))
-
-
 def export_best_trials(studies: list[optuna.Study], csv_path: Path = BEST_TRIALS_CSV) -> None:
     """Write one row per study's best trial to csv_path, creating it with a
     header on first write. Everything comes off the study itself (name,
@@ -218,55 +207,27 @@ def export_best_trials_from_db(storage: str = OPTUNA_JOURNAL_PATH, csv_path: Pat
     nothing already-completed is actually lost. This reads every study
     currently in the journal at `storage` back and hands the whole batch to
     export_best_trials, exactly like run_all would have."""
-    journal_storage = _journal_storage(storage)
-    study_names = optuna.study.get_all_study_names(journal_storage)
-    studies = [optuna.load_study(study_name=name, storage=journal_storage) for name in study_names]
-    export_best_trials(studies, csv_path=csv_path)
-
-
-def _split_trial_counts(n_trials: int, n_jobs: int) -> list[int]:
-    """Split n_trials as evenly as possible across n_jobs workers, giving
-    the first `n_trials % n_jobs` workers one extra trial so every trial is
-    accounted for exactly once. A worker's count can be 0 when n_jobs
-    exceeds n_trials -- callers should drop those before dispatching."""
-    base, remainder = divmod(n_trials, n_jobs)
-    return [base + 1 if i < remainder else base for i in range(n_jobs)]
+    export_best_trials(load_all_studies(storage), csv_path=csv_path)
 
 
 def _run_worker_trials(study_name: str, journal_path: str, n_trials: int, currencies: list[str], baseline: Indicator, cached_data: dict, c1_spec: C1Candidate, label: str, log_timing: bool) -> None:
     """Entry point for one worker process: load the study `run_optimization`
     already created (by name, from the journal log at `journal_path`) and
-    run this worker's slice of trials against it. Runs in its own process,
-    so it can't close over anything from the parent -- every argument it
-    needs is passed in explicitly instead, and the JournalStorage handle is
-    built fresh here rather than received from the parent (see
-    _journal_storage)."""
-    study = optuna.load_study(study_name=study_name, storage=_journal_storage(journal_path))
-    study.optimize(
-        lambda trial: objective(trial, currencies, baseline, cached_data, c1_spec, label, log_timing),
-        n_trials=n_trials,
-        show_progress_bar=False,
-        gc_after_trial=True,
-    )
+    run this worker's slice of trials against it -- see
+    tradeforge.backtest.optuna_journal.run_worker_trials for the mechanics
+    (it can't close over anything from this process, so every argument it
+    needs is passed in explicitly instead)."""
+    run_worker_trials(study_name, journal_path, n_trials, objective, (currencies, baseline, cached_data, c1_spec, label, log_timing))
 
 
 def _run_parallel(study_name: str, journal_path: str, counts: list[int], currencies: list[str], baseline: Indicator, cached_data: dict, c1_spec: C1Candidate, label: str, log_timing: bool) -> None:
     """Run one worker process per entry in `counts`, each running that many
-    trials against the same study. Coordination happens entirely through the
-    journal log at `journal_path` (every worker builds its own JournalStorage
-    bound to it) since separate processes don't share the in-memory Study
-    object -- that's also why the caller must reload the study from storage
-    afterward to see what the workers did."""
-    with ProcessPoolExecutor(max_workers=len(counts)) as executor:
-        futures = [
-            executor.submit(
-                _run_worker_trials, study_name, journal_path, count,
-                currencies, baseline, cached_data, c1_spec, label, log_timing,
-            )
-            for count in counts
-        ]
-        for future in futures:
-            future.result()
+    trials against the same study -- see
+    tradeforge.backtest.optuna_journal.run_parallel for the coordination
+    model (every worker builds its own JournalStorage bound to
+    `journal_path`, since separate processes don't share the in-memory
+    Study object)."""
+    run_parallel(study_name, journal_path, counts, objective, (currencies, baseline, cached_data, c1_spec, label, log_timing))
 
 
 def run_optimization(

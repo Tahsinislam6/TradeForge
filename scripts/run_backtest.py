@@ -36,8 +36,32 @@ def request_and_load_many(currencies: list[str], indicator: Indicator, trial: in
     return result
 
 
-def _load_currency_data(currencies: list[str], baseline: Indicator, c1: Indicator | None, trial: int, cached_data: dict | None = None, print_results: bool = True):
-    """Fetch + merge OHLC/ATR/baseline/(c1) data for each currency.
+def _fetch_optional(indicator: Indicator | None, cacheable: bool, cached_data: dict, currencies: list[str], trial: int):
+    """Resolve one indicator slot (baseline/c1/exit_indicator) against
+    cached_data. Returns (is_cached, dfs): dfs is {} when `indicator` is
+    None (slot unused) or already fully present in cached_data (pre-merged
+    by the caller -- e.g. Phase 2's fixed baseline, or Phase 3's fixed
+    baseline+C1 via load_phase3_cache) -- either way nothing to
+    re-request from MT4. `cacheable=False` (used for Phase 3's exit
+    indicator, which varies every trial and is never pre-merged) always
+    requests fresh when `indicator` is given, skipping the cached_data check
+    entirely."""
+    if indicator is None:
+        return True, {}
+    is_cached = cacheable and all(
+        col in cached_data[currency].columns
+        for currency in currencies
+        for col in indicator.col_names
+    )
+    dfs = {} if is_cached else request_and_load_many(currencies, indicator, trial)
+    return is_cached, dfs
+
+
+def _load_currency_data(
+    currencies: list[str], baseline: Indicator, c1: Indicator | None, trial: int,
+    cached_data: dict | None = None, print_results: bool = True, exit_indicator: Indicator | None = None,
+):
+    """Fetch + merge OHLC/ATR/baseline/(c1)/(exit_indicator) data for each currency.
 
     Returns (indicator_cols, strategy_kwargs, dfs_by_currency).
     """
@@ -45,32 +69,27 @@ def _load_currency_data(currencies: list[str], baseline: Indicator, c1: Indicato
 
     cached_data = cached_data if cached_data is not None else load_static_data(currencies)
 
-    # If the baseline's columns are already present (pre-merged into
-    # cached_data by the caller, e.g. Phase 2's fixed baseline), skip
-    # re-requesting it from MT4 on every trial.
-    baseline_cached = all(
-        col in cached_data[currency].columns
-        for currency in currencies
-        for col in baseline.col_names
-    )
-    baseline_dfs = {} if baseline_cached else request_and_load_many(currencies, baseline, trial)
+    baseline_cached, baseline_dfs = _fetch_optional(baseline, True, cached_data, currencies, trial)
+    c1_cached, c1_dfs             = _fetch_optional(c1, True, cached_data, currencies, trial)
+    exit_cached, exit_dfs         = _fetch_optional(exit_indicator, False, cached_data, currencies, trial)
 
     indicator_cols = baseline.col_names + ["ATR_Buffer_0"]
     strategy_kwargs = {"baseline": baseline}
-
-    c1_dfs = {}
-    if c1:
-        c1_dfs = request_and_load_many(currencies, c1, trial)
-        indicator_cols += c1.col_names
-        strategy_kwargs["c1"] = c1
+    for kwarg_name, indicator in (("c1", c1), ("exit_indicator", exit_indicator)):
+        if indicator:
+            indicator_cols += indicator.col_names
+            strategy_kwargs[kwarg_name] = indicator
 
     dfs_by_currency = {}
     for currency in currencies:
         dfs = [cached_data[currency]]
-        if not baseline_cached:
-            dfs.append(baseline_dfs[currency])
-        if c1:
-            dfs.append(c1_dfs[currency])
+        for indicator, is_cached, per_currency_dfs in (
+            (baseline, baseline_cached, baseline_dfs),
+            (c1, c1_cached, c1_dfs),
+            (exit_indicator, exit_cached, exit_dfs),
+        ):
+            if indicator and not is_cached:
+                dfs.append(per_currency_dfs[currency])
         df = merge_dataframes(*dfs) if len(dfs) > 1 else dfs[0].copy()
 
         if print_results:
@@ -81,7 +100,6 @@ def _load_currency_data(currencies: list[str], baseline: Indicator, c1: Indicato
 
         dfs_by_currency[currency] = df
 
-    del baseline_dfs, c1_dfs
     return indicator_cols, strategy_kwargs, dfs_by_currency
 
 
@@ -117,6 +135,8 @@ def _run_cerebro(currencies, dfs_by_currency, indicator_cols, strategy, strategy
 def _build_summary(strat, cerebro, baseline: Indicator, initial_cash: float) -> dict:
     final_value = cerebro.broker.getvalue()
     paired      = strat.analyzers.paired.get_analysis()
+    won         = paired["won"]
+    lost        = paired["lost"]
 
     return {
         "baseline":      baseline.name,
@@ -127,13 +147,19 @@ def _build_summary(strat, cerebro, baseline: Indicator, initial_cash: float) -> 
         "sharpe":        strat.analyzers.sharpe.get_analysis().get("sharperatio"),
         "max_drawdown":  strat.analyzers.drawdown.get_analysis().get("max", {}).get("drawdown", 0.0),
         "total_trades":  paired["total"],
-        "won":           paired["won"],
-        "lost":          paired["lost"],
+        "won":           won,
+        "lost":          lost,
         "win_rate":      paired["win_rate"],
         "profit_factor": paired["profit_factor"],
         "avg_bars_held": paired["avg_bars_held"],
         "min_bars_held": paired["min_bars_held"],
         "max_bars_held": paired["max_bars_held"],
+        "gross_profit":  paired["gross_profit"],
+        "gross_loss":    paired["gross_loss"],
+        "avg_win":       (paired["gross_profit"] / won) if won else 0.0,
+        "avg_loss":      (paired["gross_loss"] / lost) if lost else 0.0,
+        "pct_winners_closed_early": paired.get("pct_winners_closed_early", 0.0),
+        "avg_loss_by_reason":       paired.get("avg_loss_by_reason", {}),
     }
 
 
@@ -148,9 +174,11 @@ def run_backtest(
     cached_data: dict | None = None,
     print_results: bool = True,
     log_timing: bool = False,
+    exit_indicator: Indicator | None = None,
 ) -> dict:
-    """Backtest a baseline (+ optional C1) strategy on one or more currency
-    pairs in a single Cerebro run, sharing one portfolio equity/risk budget.
+    """Backtest a baseline (+ optional C1) (+ optional exit indicator)
+    strategy on one or more currency pairs in a single Cerebro run, sharing
+    one portfolio equity/risk budget.
 
     Args:
         cached_data: Pre-loaded static OHLC/ATR data keyed by currency (from
@@ -161,9 +189,14 @@ def run_backtest(
         log_timing: Print how long data loading (MT4 request/read) vs. the
             Cerebro run took. Meant for a one-off diagnostic run to see where
             optimizer trial time actually goes, not for routine sweeps.
+        exit_indicator: Phase 3's independent exit indicator. Only meaningful
+            with strategy=Phase3Strategy -- ignored (and simply never
+            requested/merged) otherwise.
     """
     t0 = time.perf_counter()
-    indicator_cols, strategy_kwargs, dfs_by_currency = _load_currency_data(currencies, baseline, c1, trial, cached_data, print_results)
+    indicator_cols, strategy_kwargs, dfs_by_currency = _load_currency_data(
+        currencies, baseline, c1, trial, cached_data, print_results, exit_indicator=exit_indicator,
+    )
     t1 = time.perf_counter()
     cerebro, strat = _run_cerebro(currencies, dfs_by_currency, indicator_cols, strategy, strategy_kwargs, initial_cash, plot)
     t2 = time.perf_counter()
@@ -209,14 +242,14 @@ if __name__ == "__main__":
 
     # Phase 2 — baseline + C1
 
-    # summary = run_backtest(
-    #     currencies=["EURUSD_SB"],
-    #     baseline=PriceCrossIndicator(name="SineWMA", parameters=[77, 5], buffer_values=[0], label="Baseline"),
-    #     c1=LineCrossIndicator(name="ZeroLag_MACD", parameters=[80, 40, 43], buffer_values=[1], label="C1", reverse=True),
-    #     strategy=Phase2Strategy,
-    #     plot=True,
-    # )
-    # print_summary(summary)
+    summary = run_backtest(
+        currencies=Config.IN_SAMPLE,
+        baseline=PriceCrossIndicator(name="mcginley", parameters=[29, 1, 11, 1], buffer_values=[0], label="Baseline"),
+        c1=LineCrossIndicator(name="Fisher", parameters=[21, 0.4, 0.8], buffer_values=[0], label="C1", reverse=False),
+        strategy=Phase2Strategy,
+        plot=False,
+    )
+    print_summary(summary)
 
 
     # Phase 2 — portfolio backtest with multiple currencies
@@ -234,13 +267,13 @@ if __name__ == "__main__":
     # (Config.IN_SAMPLE, 10 currencies -- the default when --only is passed
     # without a positional currency) to profile the order/broker overhead at
     # the same scale where backtest time was 2.3-3s/trial.
-    summary = run_backtest(
-        currencies=Config.IN_SAMPLE,
-        baseline=PriceCrossIndicator(name="mcginley", parameters=[29, 1, 11, 1], buffer_values=[0], label="Baseline"),
-        c1=TwoLineCrossIndicator(name="SuperTrend", parameters=[116, 3], buffer_values=[1, 0], label="C1", reverse=False),
-        strategy=Phase2Strategy,
-        plot=False,
-        log_timing=True,
-    )
-    print_summary(summary)
+    # summary = run_backtest(
+    #     currencies=Config.IN_SAMPLE,
+    #     baseline=PriceCrossIndicator(name="mcginley", parameters=[29, 1, 11, 1], buffer_values=[0], label="Baseline"),
+    #     c1=TwoLineCrossIndicator(name="SuperTrend", parameters=[116, 3], buffer_values=[1, 0], label="C1", reverse=False),
+    #     strategy=Phase2Strategy,
+    #     plot=False,
+    #     log_timing=True,
+    # )
+    # print_summary(summary)
 

@@ -10,6 +10,17 @@ class Signal(Enum):
     NONE  =  0
 
 
+class ExitReason(Enum):
+    """Why a position closed -- tagged by Phase3Strategy at the point it
+    initiates (or detects) the close, and carried through by
+    PairedTradeAnalyzer for the Step-3.4 exit-quality metrics."""
+    STOP_LOSS      = "stop_loss"       # 1.5x ATR bracket stop (t1 or un-moved t2)
+    TAKE_PROFIT    = "take_profit"     # t1's 1x ATR limit
+    BREAKEVEN_STOP = "breakeven_stop"  # t2's stop, moved to entry after t1 TP fills
+    EXIT_INDICATOR = "exit_indicator"  # Phase 3's exit indicator crossed against the position
+    DISAGREEMENT   = "disagreement"    # baseline/C1 stopped agreeing on direction
+
+
 class Indicator(ABC):
     def __init__(self, name: str, parameters: list, buffer_values: list[int],
                  label: str, reverse: bool = False):
