@@ -2,7 +2,7 @@ import math
 
 import backtrader as bt
 
-from tradeforge.backtest.config import Signal, Indicator
+from tradeforge.backtest.config import ExitReason, Signal, Indicator
 
 
 class _DataState:
@@ -273,3 +273,83 @@ class Phase2Strategy(NNFXBaseStrategy):
         for data in self.datas:
             self.p.c1.setup(self, data, plot=self.p.plot_indicators)
         self._indicators.append(self.p.c1)
+
+
+# Phase 3 — Baseline + C1 + independent exit indicator
+#
+# The exit indicator is a second, separate channel from self._indicators
+# (entry-gating stays exactly [baseline, c1], untouched from Phase 2): it's
+# checked only against open positions, in _process_data, and never required
+# to agree at entry time. See PHASE3_EXIT_DEVELOPMENT_PLAN.md for why this
+# can't just reuse the Phase2Strategy pattern of appending to _indicators.
+
+class Phase3Strategy(Phase2Strategy):
+
+    params = dict(exit_indicator=None)
+
+    def __init__(self):
+        super().__init__()
+        self._exit_indicator = self.p.exit_indicator
+        self._exit_indicator.reset()
+        for data in self.datas:
+            self._exit_indicator.setup(self, data, plot=self.p.plot_indicators)
+        # data_name -> ExitReason for the most recently closed trade on that
+        # data -- read by PairedTradeAnalyzer.exit_reason_for at trade-close
+        # time (see analyzers.py).
+        self._exit_reasons: dict[str, ExitReason] = {}
+        # data_name -> ExitReason set immediately before an explicit
+        # self.close() call this bar, consumed (and cleared) by close()
+        # itself. Anything closed without a pending tag (the baseline/C1
+        # disagreement-close inherited from NNFXBaseStrategy, which this
+        # class never touches) defaults to ExitReason.DISAGREEMENT there.
+        self._pending_close_reason: dict[str, ExitReason] = {}
+        # id(data) -> True once _move_trade2_to_breakeven has actually
+        # moved that data's t2 stop, so notify_order can tell a breakeven
+        # fill apart from t2's original 1.5x ATR stop filling untouched.
+        self._t2_breakeven_moved: dict[int, bool] = {}
+
+    def exit_reason_for(self, data_name: str) -> ExitReason | None:
+        return self._exit_reasons.get(data_name)
+
+    def _exit_signal_triggered(self, position, data) -> bool:
+        if not self._exit_indicator.crossed(data):
+            return False
+        direction = self._exit_indicator.direction(data)
+        if position.size > 0:
+            return direction == Signal.SHORT
+        return direction == Signal.LONG
+
+    def _move_trade2_to_breakeven(self, data):
+        state = self._state[id(data)]
+        old_sl = state.t2_sl_order
+        super()._move_trade2_to_breakeven(data)
+        if state.t2_sl_order is not old_sl:
+            self._t2_breakeven_moved[id(data)] = True
+
+    def notify_order(self, order):
+        if order.status == order.Completed:
+            state = self._state.get(id(order.data))
+            if state is not None:
+                name = order.data._name
+                if self._same_order(order, state.t1_sl_order):
+                    self._exit_reasons[name] = ExitReason.STOP_LOSS
+                elif self._same_order(order, state.t1_tp_order):
+                    self._exit_reasons[name] = ExitReason.TAKE_PROFIT
+                elif self._same_order(order, state.t2_sl_order):
+                    moved = self._t2_breakeven_moved.pop(id(order.data), False)
+                    self._exit_reasons[name] = ExitReason.BREAKEVEN_STOP if moved else ExitReason.STOP_LOSS
+        super().notify_order(order)
+
+    def close(self, data=None, **kwargs):
+        if data is not None:
+            self._exit_reasons[data._name] = self._pending_close_reason.pop(data._name, ExitReason.DISAGREEMENT)
+        return super().close(data=data, **kwargs)
+
+    def _process_data(self, data):
+        position = self.getposition(data)
+        if position.size != 0 and self._exit_signal_triggered(position, data):
+            self._pending_close_reason[data._name] = ExitReason.EXIT_INDICATOR
+            self._cancel_all(data)
+            self.close(data=data)
+            return
+        super()._process_data(data)

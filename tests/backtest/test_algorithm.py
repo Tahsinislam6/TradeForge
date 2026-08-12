@@ -7,9 +7,10 @@ from tradeforge.backtest.algorithm import (
     NNFXBaseStrategy,
     Phase1Strategy,
     Phase2Strategy,
+    Phase3Strategy,
     _TwoTradeDataState,
 )
-from tradeforge.backtest.config import Signal
+from tradeforge.backtest.config import ExitReason, Signal
 
 
 def _new_strategy(cls=NNFXBaseStrategy):
@@ -18,8 +19,8 @@ def _new_strategy(cls=NNFXBaseStrategy):
     return cls.__new__(cls)
 
 
-def _data(atr=1.0, close=100.0):
-    return SimpleNamespace(close=[close])
+def _data(atr=1.0, close=100.0, name="EURUSD"):
+    return SimpleNamespace(close=[close], _name=name)
 
 
 def _order(ref, status=bt.Order.Completed, size=1):
@@ -742,3 +743,331 @@ def test_phase2_strategy_init_wires_c1_for_each_data():
 
     assert c1.reset_calls == 1
     assert c1.setup_calls == [(strategy, data1, False), (strategy, data2, False)]
+
+
+# Phase3Strategy __init__ wiring
+
+def test_phase3_strategy_init_wires_exit_indicator_but_not_into_indicators_list():
+    strategy = _new_strategy(Phase3Strategy)
+    baseline = _FakeIndicator()
+    c1 = _FakeIndicator()
+    exit_indicator = _FakeIndicator()
+    data = _fake_data_feed()
+    strategy.p = SimpleNamespace(
+        baseline=baseline, atr_col="ATR_Buffer_0", c1=c1, exit_indicator=exit_indicator, plot_indicators=False,
+    )
+    strategy.datas = [data]
+
+    Phase3Strategy.__init__(strategy)
+
+    assert exit_indicator.reset_calls == 1
+    assert exit_indicator.setup_calls == [(strategy, data, False)]
+    # Entry-gating channel stays exactly [baseline, c1] -- the exit
+    # indicator is a separate channel, checked only against open positions.
+    assert strategy._indicators == [baseline, c1]
+
+
+def test_phase3_strategy_init_wires_exit_indicator_for_each_data():
+    strategy = _new_strategy(Phase3Strategy)
+    baseline = _FakeIndicator()
+    c1 = _FakeIndicator()
+    exit_indicator = _FakeIndicator()
+    data1, data2 = _fake_data_feed(), _fake_data_feed()
+    strategy.p = SimpleNamespace(
+        baseline=baseline, atr_col="ATR_Buffer_0", c1=c1, exit_indicator=exit_indicator, plot_indicators=False,
+    )
+    strategy.datas = [data1, data2]
+
+    Phase3Strategy.__init__(strategy)
+
+    assert exit_indicator.reset_calls == 1
+    assert exit_indicator.setup_calls == [(strategy, data1, False), (strategy, data2, False)]
+
+
+# Phase3Strategy._exit_signal_triggered
+
+def _phase3_with_exit_indicator(crossed=True, direction=Signal.SHORT):
+    strategy = _new_strategy(Phase3Strategy)
+    exit_indicator = _FakeIndicator()
+    data = _data()
+    exit_indicator.set_for(data, crossed=crossed, direction=direction)
+    strategy._exit_indicator = exit_indicator
+    return strategy, data
+
+
+def test_exit_signal_triggered_false_when_not_crossed():
+    strategy, data = _phase3_with_exit_indicator(crossed=False, direction=Signal.SHORT)
+
+    assert strategy._exit_signal_triggered(SimpleNamespace(size=5), data) is False
+
+
+def test_exit_signal_triggered_true_for_long_position_when_indicator_flips_short():
+    strategy, data = _phase3_with_exit_indicator(crossed=True, direction=Signal.SHORT)
+
+    assert strategy._exit_signal_triggered(SimpleNamespace(size=5), data) is True
+
+
+def test_exit_signal_triggered_false_for_long_position_when_indicator_flips_long():
+    """Crossed but agreeing with the open position isn't an exit trigger --
+    only a cross against the position's direction counts."""
+    strategy, data = _phase3_with_exit_indicator(crossed=True, direction=Signal.LONG)
+
+    assert strategy._exit_signal_triggered(SimpleNamespace(size=5), data) is False
+
+
+def test_exit_signal_triggered_true_for_short_position_when_indicator_flips_long():
+    strategy, data = _phase3_with_exit_indicator(crossed=True, direction=Signal.LONG)
+
+    assert strategy._exit_signal_triggered(SimpleNamespace(size=-5), data) is True
+
+
+def test_exit_signal_triggered_false_for_short_position_when_indicator_flips_short():
+    strategy, data = _phase3_with_exit_indicator(crossed=True, direction=Signal.SHORT)
+
+    assert strategy._exit_signal_triggered(SimpleNamespace(size=-5), data) is False
+
+
+# Phase3Strategy._process_data
+
+def _phase3_ready_strategy(position_size=5, exit_crossed=True, exit_direction=Signal.SHORT):
+    strategy = _new_strategy(Phase3Strategy)
+    data = _data()
+    exit_indicator = _FakeIndicator()
+    exit_indicator.set_for(data, crossed=exit_crossed, direction=exit_direction)
+    strategy._exit_indicator = exit_indicator
+    strategy._pending_close_reason = {}
+    strategy._exit_reasons = {}
+    strategy.getposition = lambda d: SimpleNamespace(size=position_size)
+    recorded = []
+    strategy._cancel_all = lambda d: recorded.append(("cancel_all", d))
+    strategy.close = lambda data: recorded.append(("close", data))
+    return strategy, data, recorded
+
+
+def test_process_data_open_position_exit_signal_closes_and_tags_reason():
+    strategy, data, recorded = _phase3_ready_strategy(position_size=5, exit_crossed=True, exit_direction=Signal.SHORT)
+
+    strategy._process_data(data)
+
+    assert recorded == [("cancel_all", data), ("close", data)]
+    assert strategy._pending_close_reason[data._name] == ExitReason.EXIT_INDICATOR
+
+
+def test_process_data_open_position_no_exit_signal_delegates_to_super(monkeypatch):
+    strategy, data, recorded = _phase3_ready_strategy(position_size=5, exit_crossed=False)
+    called = []
+    monkeypatch.setattr(Phase2Strategy, "_process_data", lambda self, d: called.append(d))
+
+    strategy._process_data(data)
+
+    assert recorded == []
+    assert called == [data]
+
+
+def test_process_data_flat_position_skips_exit_check_and_delegates(monkeypatch):
+    strategy, data, recorded = _phase3_ready_strategy(position_size=0, exit_crossed=True, exit_direction=Signal.SHORT)
+    called = []
+    monkeypatch.setattr(Phase2Strategy, "_process_data", lambda self, d: called.append(d))
+
+    strategy._process_data(data)
+
+    assert recorded == []
+    assert called == [data]
+
+
+# Phase3Strategy.close
+
+def test_close_tags_pending_reason_and_clears_it(monkeypatch):
+    strategy = _new_strategy(Phase3Strategy)
+    data = _data()
+    strategy._exit_reasons = {}
+    strategy._pending_close_reason = {data._name: ExitReason.EXIT_INDICATOR}
+    calls = []
+    monkeypatch.setattr(Phase2Strategy, "close", lambda self, data=None, **kwargs: calls.append(data))
+
+    strategy.close(data=data)
+
+    assert strategy._exit_reasons[data._name] == ExitReason.EXIT_INDICATOR
+    assert data._name not in strategy._pending_close_reason
+    assert calls == [data]
+
+
+def test_close_without_pending_reason_tags_disagreement(monkeypatch):
+    strategy = _new_strategy(Phase3Strategy)
+    data = _data()
+    strategy._exit_reasons = {}
+    strategy._pending_close_reason = {}
+    monkeypatch.setattr(Phase2Strategy, "close", lambda self, data=None, **kwargs: None)
+
+    strategy.close(data=data)
+
+    assert strategy._exit_reasons[data._name] == ExitReason.DISAGREEMENT
+
+
+def test_close_with_no_data_still_delegates(monkeypatch):
+    strategy = _new_strategy(Phase3Strategy)
+    strategy._exit_reasons = {}
+    strategy._pending_close_reason = {}
+    calls = []
+    monkeypatch.setattr(Phase2Strategy, "close", lambda self, data=None, **kwargs: calls.append(data))
+
+    strategy.close(data=None)
+
+    assert strategy._exit_reasons == {}
+    assert calls == [None]
+
+
+# Phase3Strategy.exit_reason_for
+
+def test_exit_reason_for_returns_tagged_reason():
+    strategy = _new_strategy(Phase3Strategy)
+    strategy._exit_reasons = {"EURUSD": ExitReason.STOP_LOSS}
+
+    assert strategy.exit_reason_for("EURUSD") == ExitReason.STOP_LOSS
+
+
+def test_exit_reason_for_returns_none_when_untagged():
+    strategy = _new_strategy(Phase3Strategy)
+    strategy._exit_reasons = {}
+
+    assert strategy.exit_reason_for("EURUSD") is None
+
+
+# Phase3Strategy._move_trade2_to_breakeven
+
+def test_move_trade2_to_breakeven_flags_when_sl_order_actually_changes(monkeypatch):
+    strategy = _new_strategy(Phase3Strategy)
+    data = _data()
+    old_sl = _order(ref=1)
+    new_sl = _order(ref=2)
+    state = _TwoTradeDataState(atr=[1.0])
+    state.t2_sl_order = old_sl
+    strategy._state = {id(data): state}
+    strategy._t2_breakeven_moved = {}
+
+    def fake_super_move(self, d):
+        state.t2_sl_order = new_sl
+
+    monkeypatch.setattr(NNFXBaseStrategy, "_move_trade2_to_breakeven", fake_super_move)
+
+    strategy._move_trade2_to_breakeven(data)
+
+    assert strategy._t2_breakeven_moved[id(data)] is True
+
+
+def test_move_trade2_to_breakeven_does_not_flag_when_sl_order_unchanged(monkeypatch):
+    strategy = _new_strategy(Phase3Strategy)
+    data = _data()
+    state = _TwoTradeDataState(atr=[1.0])
+    state.t2_sl_order = None
+    strategy._state = {id(data): state}
+    strategy._t2_breakeven_moved = {}
+
+    monkeypatch.setattr(NNFXBaseStrategy, "_move_trade2_to_breakeven", lambda self, d: None)
+
+    strategy._move_trade2_to_breakeven(data)
+
+    assert strategy._t2_breakeven_moved == {}
+
+
+# Phase3Strategy.notify_order
+
+def _phase3_with_state(data):
+    strategy = _new_strategy(Phase3Strategy)
+    state = _TwoTradeDataState(atr=[1.0])
+    strategy._state = {id(data): state}
+    strategy._exit_reasons = {}
+    strategy._t2_breakeven_moved = {}
+    return strategy, state
+
+
+def test_notify_order_t1_sl_fill_tags_stop_loss(monkeypatch):
+    data = _data()
+    strategy, state = _phase3_with_state(data)
+    t1_sl = _order(ref=4)
+    t1_sl.data = data
+    state.t1_sl_order = t1_sl
+    monkeypatch.setattr(Phase2Strategy, "notify_order", lambda self, order: None)
+
+    strategy.notify_order(t1_sl)
+
+    assert strategy._exit_reasons[data._name] == ExitReason.STOP_LOSS
+
+
+def test_notify_order_t1_tp_fill_tags_take_profit(monkeypatch):
+    data = _data()
+    strategy, state = _phase3_with_state(data)
+    t1_tp = _order(ref=3)
+    t1_tp.data = data
+    state.t1_tp_order = t1_tp
+    monkeypatch.setattr(Phase2Strategy, "notify_order", lambda self, order: None)
+
+    strategy.notify_order(t1_tp)
+
+    assert strategy._exit_reasons[data._name] == ExitReason.TAKE_PROFIT
+
+
+def test_notify_order_t2_sl_fill_tags_stop_loss_when_never_moved_to_breakeven(monkeypatch):
+    data = _data()
+    strategy, state = _phase3_with_state(data)
+    t2_sl = _order(ref=7)
+    t2_sl.data = data
+    state.t2_sl_order = t2_sl
+    monkeypatch.setattr(Phase2Strategy, "notify_order", lambda self, order: None)
+
+    strategy.notify_order(t2_sl)
+
+    assert strategy._exit_reasons[data._name] == ExitReason.STOP_LOSS
+
+
+def test_notify_order_t2_sl_fill_tags_breakeven_when_previously_moved(monkeypatch):
+    data = _data()
+    strategy, state = _phase3_with_state(data)
+    t2_sl = _order(ref=7)
+    t2_sl.data = data
+    state.t2_sl_order = t2_sl
+    strategy._t2_breakeven_moved[id(data)] = True
+    monkeypatch.setattr(Phase2Strategy, "notify_order", lambda self, order: None)
+
+    strategy.notify_order(t2_sl)
+
+    assert strategy._exit_reasons[data._name] == ExitReason.BREAKEVEN_STOP
+    assert id(data) not in strategy._t2_breakeven_moved  # consumed
+
+
+def test_notify_order_unrecognized_completed_order_tags_nothing(monkeypatch):
+    data = _data()
+    strategy, state = _phase3_with_state(data)
+    stray = _order(ref=99)
+    stray.data = data
+    monkeypatch.setattr(Phase2Strategy, "notify_order", lambda self, order: None)
+
+    strategy.notify_order(stray)
+
+    assert strategy._exit_reasons == {}
+
+
+def test_notify_order_non_completed_order_tags_nothing(monkeypatch):
+    data = _data()
+    strategy, state = _phase3_with_state(data)
+    t1_sl = _order(ref=4, status=bt.Order.Submitted)
+    t1_sl.data = data
+    state.t1_sl_order = t1_sl
+    monkeypatch.setattr(Phase2Strategy, "notify_order", lambda self, order: None)
+
+    strategy.notify_order(t1_sl)
+
+    assert strategy._exit_reasons == {}
+
+
+def test_notify_order_always_delegates_to_super(monkeypatch):
+    data = _data()
+    strategy, state = _phase3_with_state(data)
+    stray = _order(ref=99)
+    stray.data = data
+    calls = []
+    monkeypatch.setattr(Phase2Strategy, "notify_order", lambda self, order: calls.append(order))
+
+    strategy.notify_order(stray)
+
+    assert calls == [stray]
