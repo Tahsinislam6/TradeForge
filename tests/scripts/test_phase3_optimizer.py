@@ -20,7 +20,7 @@ from scripts.phase3_optimizer import (
     run_all,
     run_optimization,
 )
-from tradeforge.backtest.candidates.exit_candidates import ExitCandidate
+from tradeforge.backtest.candidates.candidate_types import ExitCandidate
 from tradeforge.backtest.candidates.param_space import IntParam
 from tradeforge.backtest.config import LineCrossIndicator, PriceCrossIndicator
 

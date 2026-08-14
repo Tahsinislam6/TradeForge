@@ -19,7 +19,7 @@ from scripts.phase2_optimizer import (
     run_all,
     run_optimization,
 )
-from tradeforge.backtest.candidates.c1_candidates import C1Candidate
+from tradeforge.backtest.candidates.candidate_types import C1Candidate
 from tradeforge.backtest.candidates.param_space import IntParam
 from tradeforge.backtest.config import LineCrossIndicator, PriceCrossIndicator
 
@@ -33,55 +33,78 @@ def _trial(**user_attrs):
 # get_constraint_violations
 
 def test_get_constraint_violations_missing_attr_returns_all_failed_value():
-    trial = _trial(total_trades=250, win_rate=80.0, max_drawdown=5.0)  # avg_bars_held omitted
+    trial = _trial(total_trades=250, win_rate=80.0, max_drawdown=5.0, profit_factor=1.2)  # avg_bars_held omitted
 
-    result = get_constraint_violations(trial, min_trades=200, min_win_rate=60.0, min_avg_bars_held=8.0, max_drawdown=60.0)
+    result = get_constraint_violations(
+        trial, min_trades=200, min_win_rate=60.0, min_avg_bars_held=8.0, max_drawdown=60.0, min_profit_factor=0.9,
+    )
 
-    assert result == (FAILED_TRIAL_VALUE,) * 4
+    assert result == (FAILED_TRIAL_VALUE,) * 5
 
 
 def test_get_constraint_violations_all_within_bounds_returns_zeros():
-    trial = _trial(total_trades=250, win_rate=80.0, avg_bars_held=10.0, max_drawdown=5.0)
+    trial = _trial(total_trades=250, win_rate=80.0, avg_bars_held=10.0, max_drawdown=5.0, profit_factor=1.2)
 
-    result = get_constraint_violations(trial, min_trades=200, min_win_rate=60.0, min_avg_bars_held=8.0, max_drawdown=60.0)
+    result = get_constraint_violations(
+        trial, min_trades=200, min_win_rate=60.0, min_avg_bars_held=8.0, max_drawdown=60.0, min_profit_factor=0.9,
+    )
 
-    assert result == (0.0, 0.0, 0.0, 0.0)
+    assert result == (0.0, 0.0, 0.0, 0.0, 0.0)
 
 
 def test_get_constraint_violations_total_trades_below_min():
-    trial = _trial(total_trades=150, win_rate=80.0, avg_bars_held=10.0, max_drawdown=5.0)
+    trial = _trial(total_trades=150, win_rate=80.0, avg_bars_held=10.0, max_drawdown=5.0, profit_factor=1.2)
 
-    result = get_constraint_violations(trial, min_trades=200, min_win_rate=60.0, min_avg_bars_held=8.0, max_drawdown=60.0)
+    result = get_constraint_violations(
+        trial, min_trades=200, min_win_rate=60.0, min_avg_bars_held=8.0, max_drawdown=60.0, min_profit_factor=0.9,
+    )
 
     assert result[0] == pytest.approx(50.0)
-    assert result[1:] == (0.0, 0.0, 0.0)
+    assert result[1:] == (0.0, 0.0, 0.0, 0.0)
 
 
 def test_get_constraint_violations_win_rate_below_min():
-    trial = _trial(total_trades=250, win_rate=40.0, avg_bars_held=10.0, max_drawdown=5.0)
+    trial = _trial(total_trades=250, win_rate=40.0, avg_bars_held=10.0, max_drawdown=5.0, profit_factor=1.2)
 
-    result = get_constraint_violations(trial, min_trades=200, min_win_rate=60.0, min_avg_bars_held=8.0, max_drawdown=60.0)
+    result = get_constraint_violations(
+        trial, min_trades=200, min_win_rate=60.0, min_avg_bars_held=8.0, max_drawdown=60.0, min_profit_factor=0.9,
+    )
 
     assert result[1] == pytest.approx(20.0)
-    assert (result[0], result[2], result[3]) == (0.0, 0.0, 0.0)
+    assert (result[0], result[2], result[3], result[4]) == (0.0, 0.0, 0.0, 0.0)
 
 
 def test_get_constraint_violations_avg_bars_held_below_min():
-    trial = _trial(total_trades=250, win_rate=80.0, avg_bars_held=5.0, max_drawdown=5.0)
+    trial = _trial(total_trades=250, win_rate=80.0, avg_bars_held=5.0, max_drawdown=5.0, profit_factor=1.2)
 
-    result = get_constraint_violations(trial, min_trades=200, min_win_rate=60.0, min_avg_bars_held=8.0, max_drawdown=60.0)
+    result = get_constraint_violations(
+        trial, min_trades=200, min_win_rate=60.0, min_avg_bars_held=8.0, max_drawdown=60.0, min_profit_factor=0.9,
+    )
 
     assert result[2] == pytest.approx(3.0)
-    assert (result[0], result[1], result[3]) == (0.0, 0.0, 0.0)
+    assert (result[0], result[1], result[3], result[4]) == (0.0, 0.0, 0.0, 0.0)
 
 
 def test_get_constraint_violations_max_drawdown_above_max():
-    trial = _trial(total_trades=250, win_rate=80.0, avg_bars_held=10.0, max_drawdown=70.0)
+    trial = _trial(total_trades=250, win_rate=80.0, avg_bars_held=10.0, max_drawdown=70.0, profit_factor=1.2)
 
-    result = get_constraint_violations(trial, min_trades=200, min_win_rate=60.0, min_avg_bars_held=8.0, max_drawdown=60.0)
+    result = get_constraint_violations(
+        trial, min_trades=200, min_win_rate=60.0, min_avg_bars_held=8.0, max_drawdown=60.0, min_profit_factor=0.9,
+    )
 
     assert result[3] == pytest.approx(10.0)
-    assert (result[0], result[1], result[2]) == (0.0, 0.0, 0.0)
+    assert (result[0], result[1], result[2], result[4]) == (0.0, 0.0, 0.0, 0.0)
+
+
+def test_get_constraint_violations_profit_factor_below_min():
+    trial = _trial(total_trades=250, win_rate=80.0, avg_bars_held=10.0, max_drawdown=5.0, profit_factor=0.5)
+
+    result = get_constraint_violations(
+        trial, min_trades=200, min_win_rate=60.0, min_avg_bars_held=8.0, max_drawdown=60.0, min_profit_factor=0.9,
+    )
+
+    assert result[4] == pytest.approx(0.4)
+    assert (result[0], result[1], result[2], result[3]) == (0.0, 0.0, 0.0, 0.0)
 
 
 # _build_sampler
@@ -105,12 +128,27 @@ def test_build_sampler_nsga2_returns_sampler_wired_to_module_thresholds(monkeypa
     monkeypatch.setattr("scripts.phase2_optimizer.MIN_WIN_RATE", 60.0)
     monkeypatch.setattr("scripts.phase2_optimizer.MIN_AVG_BARS_HELD", 8.0)
     monkeypatch.setattr("scripts.phase2_optimizer.MAX_DRAWDOWN", 60.0)
+    monkeypatch.setattr("scripts.phase2_optimizer.MIN_PROFIT_FACTOR", 0.9)
 
     sampler = _build_sampler(_c1_candidate(sampler="nsga2"))
 
     assert isinstance(sampler, optuna.samplers.NSGAIISampler)
-    trial = _trial(total_trades=150, win_rate=80.0, avg_bars_held=10.0, max_drawdown=5.0)
+    trial = _trial(total_trades=150, win_rate=80.0, avg_bars_held=10.0, max_drawdown=5.0, profit_factor=1.2)
     assert sampler._constraints_func(trial)[0] == pytest.approx(50.0)
+
+
+@pytest.mark.filterwarnings("ignore::optuna.exceptions.ExperimentalWarning")
+def test_build_sampler_nsga2_wires_profit_factor_threshold(monkeypatch):
+    monkeypatch.setattr("scripts.phase2_optimizer.MIN_TRADES", 200)
+    monkeypatch.setattr("scripts.phase2_optimizer.MIN_WIN_RATE", 60.0)
+    monkeypatch.setattr("scripts.phase2_optimizer.MIN_AVG_BARS_HELD", 8.0)
+    monkeypatch.setattr("scripts.phase2_optimizer.MAX_DRAWDOWN", 60.0)
+    monkeypatch.setattr("scripts.phase2_optimizer.MIN_PROFIT_FACTOR", 0.9)
+
+    sampler = _build_sampler(_c1_candidate(sampler="nsga2"))
+
+    trial = _trial(total_trades=250, win_rate=80.0, avg_bars_held=10.0, max_drawdown=5.0, profit_factor=0.5)
+    assert sampler._constraints_func(trial)[4] == pytest.approx(0.4)
 
 
 # objective
@@ -123,7 +161,10 @@ def _ask(study=None):
 def test_objective_happy_path_sets_user_attrs_and_returns_score(monkeypatch):
     monkeypatch.setattr(
         "scripts.phase2_optimizer.run_backtest",
-        lambda **kwargs: {"total_trades": 250, "win_rate": 75.0, "avg_bars_held": 10.0, "max_drawdown": 5.0},
+        lambda **kwargs: {
+            "total_trades": 250, "win_rate": 75.0, "avg_bars_held": 10.0, "max_drawdown": 5.0,
+            "profit_factor": 1.5, "avg_loss": -20.0,
+        },
     )
     monkeypatch.setattr("scripts.phase2_optimizer.clear_external_files", lambda *a, **k: None)
     trial = _ask()
@@ -131,16 +172,20 @@ def test_objective_happy_path_sets_user_attrs_and_returns_score(monkeypatch):
 
     score = objective(trial, ["EURUSD_SB"], baseline, {}, _c1_candidate())
 
-    assert score == pytest.approx(100.0)  # min(75/75,1)*70 + min(10/10,1)*30
+    assert score == pytest.approx(100.0)  # min(75/75,1)*40 + min(10/10,1)*20 + min(1.5/1.5,1)*40
     assert trial.user_attrs == {
         "total_trades": 250, "win_rate": 75.0, "avg_bars_held": 10.0, "max_drawdown": 5.0,
+        "profit_factor": 1.5, "avg_loss": -20.0,
     }
 
 
-def test_objective_score_caps_win_rate_and_bars_held_contributions(monkeypatch):
+def test_objective_score_caps_win_rate_bars_held_and_profit_factor_contributions(monkeypatch):
     monkeypatch.setattr(
         "scripts.phase2_optimizer.run_backtest",
-        lambda **kwargs: {"total_trades": 250, "win_rate": 150.0, "avg_bars_held": 40.0, "max_drawdown": 5.0},
+        lambda **kwargs: {
+            "total_trades": 250, "win_rate": 150.0, "avg_bars_held": 40.0, "max_drawdown": 5.0,
+            "profit_factor": 3.0, "avg_loss": -10.0,
+        },
     )
     monkeypatch.setattr("scripts.phase2_optimizer.clear_external_files", lambda *a, **k: None)
     baseline = SimpleNamespace(name="Baseline", parameters=[1])
@@ -150,11 +195,31 @@ def test_objective_score_caps_win_rate_and_bars_held_contributions(monkeypatch):
     assert score == pytest.approx(100.0)
 
 
+def test_objective_score_weights_profit_factor_contribution(monkeypatch):
+    monkeypatch.setattr(
+        "scripts.phase2_optimizer.run_backtest",
+        lambda **kwargs: {
+            "total_trades": 250, "win_rate": 75.0, "avg_bars_held": 10.0, "max_drawdown": 5.0,
+            "profit_factor": 0.75, "avg_loss": -10.0,
+        },
+    )
+    monkeypatch.setattr("scripts.phase2_optimizer.clear_external_files", lambda *a, **k: None)
+    baseline = SimpleNamespace(name="Baseline", parameters=[1])
+
+    score = objective(_ask(), ["EURUSD_SB"], baseline, {}, _c1_candidate())
+
+    # min(75/75,1)*40 + min(10/10,1)*20 + min(0.75/1.5,1)*40 = 40 + 20 + 20
+    assert score == pytest.approx(80.0)
+
+
 def test_objective_passes_correct_kwargs_to_run_backtest(monkeypatch):
     captured = {}
     monkeypatch.setattr(
         "scripts.phase2_optimizer.run_backtest",
-        lambda **kwargs: captured.update(kwargs) or {"total_trades": 250, "win_rate": 75.0, "avg_bars_held": 10.0, "max_drawdown": 5.0},
+        lambda **kwargs: captured.update(kwargs) or {
+            "total_trades": 250, "win_rate": 75.0, "avg_bars_held": 10.0, "max_drawdown": 5.0,
+            "profit_factor": 1.5, "avg_loss": -20.0,
+        },
     )
     monkeypatch.setattr("scripts.phase2_optimizer.clear_external_files", lambda *a, **k: None)
     baseline = SimpleNamespace(name="Baseline", parameters=[1])
@@ -175,7 +240,10 @@ def test_objective_line_cross_candidate_passes_cross_level_to_c1(monkeypatch):
     captured = {}
     monkeypatch.setattr(
         "scripts.phase2_optimizer.run_backtest",
-        lambda **kwargs: captured.update(kwargs) or {"total_trades": 250, "win_rate": 75.0, "avg_bars_held": 10.0, "max_drawdown": 5.0},
+        lambda **kwargs: captured.update(kwargs) or {
+            "total_trades": 250, "win_rate": 75.0, "avg_bars_held": 10.0, "max_drawdown": 5.0,
+            "profit_factor": 1.5, "avg_loss": -20.0,
+        },
     )
     monkeypatch.setattr("scripts.phase2_optimizer.clear_external_files", lambda *a, **k: None)
     baseline = SimpleNamespace(name="Baseline", parameters=[1])
@@ -206,7 +274,10 @@ def test_objective_prunes_and_still_clears_files_when_run_backtest_raises(monkey
 def test_objective_prunes_when_total_trades_at_or_below_minimum(monkeypatch):
     monkeypatch.setattr(
         "scripts.phase2_optimizer.run_backtest",
-        lambda **kwargs: {"total_trades": 200, "win_rate": 75.0, "avg_bars_held": 10.0, "max_drawdown": 5.0},
+        lambda **kwargs: {
+            "total_trades": 200, "win_rate": 75.0, "avg_bars_held": 10.0, "max_drawdown": 5.0,
+            "profit_factor": 1.5, "avg_loss": -20.0,
+        },
     )
     monkeypatch.setattr("scripts.phase2_optimizer.clear_external_files", lambda *a, **k: None)
     baseline = SimpleNamespace(name="Baseline", parameters=[1])
@@ -250,19 +321,20 @@ def test_load_baseline_cache_wraps_failures_in_runtime_error(monkeypatch):
 
 # export_best_trials
 
-def _completed_trial(value, total_trades, win_rate=70.0, avg_bars_held=9.0, max_drawdown=4.0):
+def _completed_trial(value, total_trades, win_rate=70.0, avg_bars_held=9.0, max_drawdown=4.0, profit_factor=1.2, avg_loss=-10.0):
     # No system_attrs["constraints"] is ever set here -- that's deliberate.
     # GridSampler never calls constraints_func (see build_sampler), so a
     # grid-sampled trial never has that key either. export_best_trials must
     # judge feasibility from these real user_attrs values against the
-    # module's MIN_TRADES/MIN_WIN_RATE/MIN_AVG_BARS_HELD/MAX_DRAWDOWN
-    # thresholds itself, not by reading Optuna's sampler-populated
-    # system_attrs (which nsga2 sets but grid doesn't).
+    # module's MIN_TRADES/MIN_WIN_RATE/MIN_AVG_BARS_HELD/MAX_DRAWDOWN/
+    # MIN_PROFIT_FACTOR thresholds itself, not by reading Optuna's
+    # sampler-populated system_attrs (which nsga2 sets but grid doesn't).
     return create_trial(
         state=TrialState.COMPLETE, value=value, params={},
         user_attrs={
             "total_trades": total_trades, "win_rate": win_rate,
             "avg_bars_held": avg_bars_held, "max_drawdown": max_drawdown,
+            "profit_factor": profit_factor, "avg_loss": avg_loss,
         },
     )
 
@@ -290,6 +362,25 @@ def test_export_best_trials_writes_feasible_row(tmp_path):
     assert rows[0]["feasible"] == "True"
     assert rows[0]["c1_name"] == "C1"
     assert rows[0]["total_trades"] == "250"
+    assert rows[0]["profit_factor"] == "1.2"
+    assert rows[0]["avg_loss"] == "-10.0"
+
+
+def test_export_best_trials_profit_factor_below_min_marks_infeasible(tmp_path):
+    # A net-losing trial (profit_factor below MIN_PROFIT_FACTOR=0.9) must be
+    # excluded from feasible_trials even though every other threshold is met
+    # -- this is the exact case profit_factor governance exists to catch.
+    study = _study_with_trials([
+        _completed_trial(90.0, total_trades=250, profit_factor=0.5),
+    ])
+    csv_path = tmp_path / "best.csv"
+
+    export_best_trials([study], csv_path=csv_path)
+
+    with open(csv_path, newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 1
+    assert rows[0]["feasible"] == "False"
 
 
 def test_export_best_trials_falls_back_to_infeasible_best_and_flags_it(tmp_path):
@@ -379,13 +470,14 @@ def test_export_best_trials_handles_multiple_studies_independently(tmp_path):
 
 def test_export_best_trials_boundary_values_are_feasible(tmp_path):
     # Exactly at every threshold (MIN_TRADES=200, MIN_WIN_RATE=60.0,
-    # MIN_AVG_BARS_HELD=8.0, MAX_DRAWDOWN=60.0). get_constraint_violations
-    # computes violations as max(0.0, threshold - value) (or the mirror for
-    # max_drawdown), so a value sitting exactly on a threshold must count as
-    # satisfying it, not violating it -- a real grid sweep can land exactly
-    # on a boundary and it shouldn't get discarded.
+    # MIN_AVG_BARS_HELD=8.0, MAX_DRAWDOWN=60.0, MIN_PROFIT_FACTOR=0.9).
+    # get_constraint_violations computes violations as max(0.0, threshold -
+    # value) (or the mirror for max_drawdown), so a value sitting exactly on
+    # a threshold must count as satisfying it, not violating it -- a real
+    # grid sweep can land exactly on a boundary and it shouldn't get
+    # discarded.
     study = _study_with_trials([
-        _completed_trial(75.0, total_trades=200, win_rate=60.0, avg_bars_held=8.0, max_drawdown=60.0),
+        _completed_trial(75.0, total_trades=200, win_rate=60.0, avg_bars_held=8.0, max_drawdown=60.0, profit_factor=0.9),
     ])
     csv_path = tmp_path / "best.csv"
 

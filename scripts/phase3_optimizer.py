@@ -9,7 +9,8 @@ from functools import partial
 
 from scripts.run_backtest import request_and_load_many, run_backtest
 from tradeforge.backtest.algorithm import Phase2Strategy, Phase3Strategy
-from tradeforge.backtest.candidates.exit_candidates import EXIT_CANDIDATES, ExitCandidate
+from tradeforge.backtest.candidates.exit_candidates import EXIT_CANDIDATES
+from tradeforge.backtest.candidates.candidate_types import ExitCandidate
 from tradeforge.backtest.candidates.param_space import build_sampler, fixed_values, grid_trial_count, suggest_params
 from tradeforge.backtest.config import *
 from tradeforge.backtest.optuna_journal import (

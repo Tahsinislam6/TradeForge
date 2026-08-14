@@ -4,7 +4,8 @@ import secrets
 from pathlib import Path
 
 from tradeforge.backtest.baseline import baseline_backtest, BaselineMetrics
-from tradeforge.backtest.candidates.baseline_candidates import BASELINE_CANDIDATES, BaselineCandidate
+from tradeforge.backtest.candidates.baseline_candidates import BASELINE_CANDIDATES
+from tradeforge.backtest.candidates.candidate_types import BaselineCandidate
 from tradeforge.backtest.candidates.param_space import (
     IntParam,
     ParamSpace,
@@ -12,6 +13,12 @@ from tradeforge.backtest.candidates.param_space import (
     fixed_values,
     grid_trial_count,
     suggest_params,
+)
+from tradeforge.backtest.optuna_journal import (
+    journal_storage as _journal_storage,
+    run_parallel,
+    run_worker_trials,
+    split_trial_counts as _split_trial_counts,
 )
 from tradeforge.config import Config
 from tradeforge.data.cleanup import clear_external_files
@@ -21,6 +28,11 @@ from tradeforge.data.zigzag import calculate_atr_zigzag
 from tradeforge.utils.notification import send_notification
 
 FAILED_TRIAL_VALUE = 1e6
+OPTUNA_JOURNAL_PATH = str(Path(__file__).parent.parent / "optuna_journal.log")
+# optuna-dashboard --storage-class JournalFileStorage optuna_journal.log
+# Shared with phase2_optimizer.py/phase3_optimizer.py -- every phase's study
+# names are randomly-coded and phase-tagged (see run_optimization), so one
+# journal log can safely hold every phase's studies.
 
 
 
@@ -33,20 +45,18 @@ def get_constraint_violations(trial):
     snapshot passed to after_trial by Optuna's internal cache.
 
     Returns:
-        Tuple of (distance_atr_violation, avg_bars_violation,
-        distance_atr_std_violation, volatility_violation).
+        Tuple of (distance_atr_violation, distance_atr_std_violation,
+        volatility_violation).
     """
-    avg_bars_held = trial.user_attrs.get("avg_bars_held")
     distance_atr_ratio = trial.user_attrs.get("distance_atr_ratio")
     distance_atr_std = trial.user_attrs.get("distance_atr_std")
     volatility_ratio = trial.user_attrs.get("volatility_ratio")
-    if any(v is None for v in (avg_bars_held, distance_atr_ratio, distance_atr_std, volatility_ratio)):
-        return (FAILED_TRIAL_VALUE, FAILED_TRIAL_VALUE, FAILED_TRIAL_VALUE, FAILED_TRIAL_VALUE)
+    if any(v is None for v in (distance_atr_ratio, distance_atr_std, volatility_ratio)):
+        return (FAILED_TRIAL_VALUE, FAILED_TRIAL_VALUE, FAILED_TRIAL_VALUE)
     distance_violation = max(0.0, distance_atr_ratio - Config.BASELINE_MAX_ATR_RATIO, Config.BASELINE_MIN_ATR_RATIO - distance_atr_ratio)
-    avg_bars_violation = max(0.0, Config.BASELINE_MIN_AVG_BARS_HELD - avg_bars_held)
     distance_std_violation = max(0.0, distance_atr_std - Config.BASELINE_MAX_DISTANCE_ATR_STD)
     volatility_violation = max(0.0, volatility_ratio - Config.BASELINE_MAX_VOLATILITY_RATIO)
-    return (distance_violation, avg_bars_violation, distance_std_violation, volatility_violation)
+    return (distance_violation, distance_std_violation, volatility_violation)
 
 
 def objective(trial: optuna.Trial, indicator_name: str, currencies: list, cached_data: dict, param_space: ParamSpace):
@@ -122,21 +132,49 @@ def _resolve_trial_count(candidate: BaselineCandidate, n_trials: int | None) -> 
     return n_trials
 
 
+def _run_worker_trials(
+    study_name: str, journal_path: str, n_trials: int, indicator_name: str,
+    currencies: list, cached_data: dict, param_space: ParamSpace,
+) -> None:
+    """Entry point for one worker process: load the study `run_optimization`
+    already created (by name, from the journal log at `journal_path`) and
+    run this worker's slice of trials against it -- see
+    tradeforge.backtest.optuna_journal.run_worker_trials for the mechanics
+    (it can't close over anything from this process, so every argument it
+    needs is passed in explicitly instead)."""
+    run_worker_trials(study_name, journal_path, n_trials, objective, (indicator_name, currencies, cached_data, param_space))
+
+
+def _run_parallel(
+    study_name: str, journal_path: str, counts: list[int], indicator_name: str,
+    currencies: list, cached_data: dict, param_space: ParamSpace,
+) -> None:
+    """Run one worker process per entry in `counts`, each running that many
+    trials against the same study -- see
+    tradeforge.backtest.optuna_journal.run_parallel for the coordination
+    model (every worker builds its own JournalStorage bound to
+    `journal_path`, since separate processes don't share the in-memory
+    Study object)."""
+    run_parallel(study_name, journal_path, counts, objective, (indicator_name, currencies, cached_data, param_space))
+
+
 def run_optimization(
     candidate: BaselineCandidate,
     n_trials: int | None = None,
     currencies: list = None,
     cached_data: dict | None = None,
+    n_jobs: int = 1,
 ):
     """Run an Optuna optimisation over one baseline candidate's parameters.
 
     With the default "nsga2" sampler this minimises whipsaw frequency and
     maximises capture efficiency, enforcing hard constraints on distance/ATR
-    ratio (mean and spread), average bars held, and the baseline's own
-    bar-to-bar volatility relative to ATR (catches unstable parameterizations
-    that oscillate independently of price) — see BaselineCandidate.sampler
-    for the "grid" alternative and what it does/doesn't enforce. Results are
-    persisted to a sqlite database at the project root, each run getting its
+    ratio (mean and spread) and the baseline's own bar-to-bar volatility
+    relative to ATR (catches unstable parameterizations that oscillate
+    independently of price) — see BaselineCandidate.sampler for the "grid"
+    alternative and what it does/doesn't enforce. Results are persisted to a
+    journal log at the project root (shared with phase2_optimizer.py and
+    phase3_optimizer.py -- see OPTUNA_JOURNAL_PATH), each run getting its
     own randomly-coded study name so repeated runs never collide or resume
     into each other's trials.
 
@@ -152,6 +190,9 @@ def run_optimization(
         currencies: Currency pairs to test. Defaults to Config.IN_SAMPLE.
         cached_data: Pre-loaded static+ZigZag data from load_baseline_data.
             Loaded internally if omitted, so this still works standalone.
+        n_jobs: Number of worker processes to split n_trials across, same
+            semantics as phase2_optimizer.py/phase3_optimizer.py's
+            run_optimization. Default 1 runs trials sequentially in-process.
 
     Returns:
         The completed optuna.Study object.
@@ -168,22 +209,31 @@ def run_optimization(
     fixed = fixed_values(candidate.param_space)
     suffix = ("_" + "_".join(str(p) for p in fixed)) if fixed else ""
     run_code = secrets.token_hex(3)
+    study_name = f"{run_code}_{candidate.name}_baseline_optimization{suffix}"
     study = optuna.create_study(
         directions=["minimize", "maximize"],
         sampler=build_sampler(candidate.sampler, candidate.param_space, constraints_func=get_constraint_violations),
-        storage="sqlite:///" + str(Path(__file__).parent.parent / "optuna.db"),
-        # optuna-dashboard sqlite:///optuna.db
-        study_name=f"{run_code}_{candidate.name}_baseline_optimization{suffix}",
+        storage=_journal_storage(OPTUNA_JOURNAL_PATH),
+        study_name=study_name,
         load_if_exists=True,
     )
     study.set_user_attr("indicator_name", candidate.name)
     study.set_user_attr("fixed_params", fixed)
-    study.optimize(
-        lambda trial: objective(trial, candidate.name, currencies, cached_data, candidate.param_space),
-        n_trials=n_trials,
-        show_progress_bar=False,
-        gc_after_trial=True,
-    )
+
+    if n_jobs > 1:
+        counts = [c for c in _split_trial_counts(n_trials, n_jobs) if c > 0]
+        _run_parallel(study_name, OPTUNA_JOURNAL_PATH, counts, candidate.name, currencies, cached_data, candidate.param_space)
+        # Workers ran in separate processes against their own Study handles,
+        # so this process's `study` object never saw their trials -- reload
+        # it from storage to get them.
+        study = optuna.load_study(study_name=study_name, storage=_journal_storage(OPTUNA_JOURNAL_PATH))
+    else:
+        study.optimize(
+            lambda trial: objective(trial, candidate.name, currencies, cached_data, candidate.param_space),
+            n_trials=n_trials,
+            show_progress_bar=False,
+            gc_after_trial=True,
+        )
     return study
 
 
@@ -191,12 +241,15 @@ def run_all(
     currencies: list[str],
     n_trials: int | None = None,
     candidates: list[BaselineCandidate] = BASELINE_CANDIDATES,
+    n_jobs: int = 1,
 ) -> None:
     """Sweep every candidate in `candidates`, one Optuna study each. `n_trials`
     is the default trial count, used for any candidate that doesn't set its
     own BaselineCandidate.n_trials. A candidate that fails outright (e.g. a
     misspelled MT4 indicator name) is logged and skipped so it doesn't abort
-    the rest of the batch."""
+    the rest of the batch. `n_jobs` is forwarded to run_optimization for
+    every candidate, same semantics as phase2_optimizer.py/
+    phase3_optimizer.py's run_all."""
     cached_data = load_baseline_data(currencies)
 
     completed, failed = [], []
@@ -208,6 +261,7 @@ def run_all(
                 n_trials=n_trials,
                 currencies=currencies,
                 cached_data=cached_data,
+                n_jobs=n_jobs,
             )
         except Exception as e:
             print(f"[ERROR] {candidate.name} failed: {e}")
@@ -253,6 +307,11 @@ if __name__ == "__main__":
     parser.add_argument("--only", type=str, default=None,
                          help="Only sweep the BASELINE_CANDIDATES entry with this name "
                               "(case-insensitive). Ignored if indicator_name is given.")
+    parser.add_argument("--workers", type=int, default=1,
+                         help="Number of worker processes to split each candidate's trials "
+                              "across. Workers coordinate through the shared JournalStorage "
+                              "log, so this is safe to raise up to roughly your CPU core "
+                              "count. Default 1 (sequential, in-process).")
     args = parser.parse_args()
 
     currencies = args.currencies or Config.IN_SAMPLE
@@ -261,7 +320,7 @@ if __name__ == "__main__":
         if args.trials is None:
             raise SystemExit("trials is required for a one-off indicator_name run")
         candidate = BaselineCandidate(name=args.indicator_name, param_space=[IntParam(1, 100)], n_trials=args.trials)
-        run_optimization(candidate, currencies=currencies)
+        run_optimization(candidate, currencies=currencies, n_jobs=args.workers)
     else:
         candidates = BASELINE_CANDIDATES
         if args.only:
@@ -269,7 +328,7 @@ if __name__ == "__main__":
             if not candidates:
                 available = ", ".join(c.name for c in BASELINE_CANDIDATES)
                 raise SystemExit(f"No BASELINE_CANDIDATES entry named '{args.only}'. Available: {available}")
-        run_all(currencies=currencies, n_trials=args.trials, candidates=candidates)
+        run_all(currencies=currencies, n_trials=args.trials, candidates=candidates, n_jobs=args.workers)
 
     send_notification("Baseline optimization completed")
 

@@ -14,5 +14,7 @@ venv/
 .env.local
 *.env
 *.ps1
-tradeforge/backtest/candidates
-# If you want to allow specific CSVs, use ! (uncomment and edit as needed)
+tradeforge/backtest/candidates/*
+# Allowed files
+!tradeforge/backtest/candidates/param_space.py
+!tradeforge/backtest/candidates/candidate_types.py
