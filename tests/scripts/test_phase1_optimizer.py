@@ -17,6 +17,7 @@ from scripts.phase1_optimizer import (
     _split_trial_counts,
     evaluate_trial,
     get_constraint_violations,
+    get_feasible_trials,
     load_baseline_data,
     objective,
     run_all,
@@ -102,6 +103,37 @@ def test_get_constraint_violations_volatility_ratio_above_max(monkeypatch):
     assert (result[0], result[1]) == (0.0, 0.0)
 
 
+def test_get_constraint_violations_exact_bounds_are_feasible(monkeypatch):
+    # Bounds are inclusive: sitting exactly on a threshold must not register
+    # as a violation.
+    _set_thresholds(monkeypatch)
+    trial = _trial(distance_atr_ratio=2.0, distance_atr_std=1.0, volatility_ratio=1.0)
+
+    result = get_constraint_violations(trial)
+
+    assert result == (0.0, 0.0, 0.0)
+
+
+def test_get_constraint_violations_min_bound_is_feasible(monkeypatch):
+    _set_thresholds(monkeypatch)
+    trial = _trial(distance_atr_ratio=1.3, distance_atr_std=0.0, volatility_ratio=0.0)
+
+    result = get_constraint_violations(trial)
+
+    assert result == (0.0, 0.0, 0.0)
+
+
+def test_get_constraint_violations_all_three_violated_simultaneously(monkeypatch):
+    _set_thresholds(monkeypatch)
+    trial = _trial(distance_atr_ratio=3.0, distance_atr_std=2.0, volatility_ratio=1.5)
+
+    result = get_constraint_violations(trial)
+
+    assert result[0] == pytest.approx(1.0)  # 3.0 - 2.0
+    assert result[1] == pytest.approx(1.0)  # 2.0 - 1.0
+    assert result[2] == pytest.approx(0.5)  # 1.5 - 1.0
+
+
 def test_get_constraint_violations_ignores_avg_bars_held():
     # avg_bars_held is still tracked as a metric (see objective()) but is no
     # longer gated as a constraint -- an arbitrarily low value must not
@@ -111,6 +143,63 @@ def test_get_constraint_violations_ignores_avg_bars_held():
     result = get_constraint_violations(trial)
 
     assert result == (0.0, 0.0, 0.0)
+
+
+# get_feasible_trials
+
+def _add_trial(study, state=TrialState.COMPLETE, **user_attrs):
+    values = [1.0, 1.0] if state == TrialState.COMPLETE else None
+    study.add_trial(create_trial(state=state, values=values, params={}, distributions={}, user_attrs=user_attrs))
+
+
+def test_get_feasible_trials_keeps_only_trials_within_bounds(monkeypatch):
+    _set_thresholds(monkeypatch)
+    study = optuna.create_study(directions=["minimize", "maximize"])
+    _add_trial(study, distance_atr_ratio=1.5, distance_atr_std=0.5, volatility_ratio=0.5)  # feasible
+    _add_trial(study, distance_atr_ratio=3.0, distance_atr_std=0.5, volatility_ratio=0.5)  # violates distance
+
+    result = get_feasible_trials(study)
+
+    assert len(result) == 1
+    assert result[0].user_attrs["distance_atr_ratio"] == 1.5
+
+
+def test_get_feasible_trials_works_without_constraints_system_attrs(monkeypatch):
+    # GridSampler never calls constraints_func, so it never writes
+    # system_attrs["constraints"] -- get_feasible_trials must judge
+    # feasibility from user_attrs alone, since this is exactly the state a
+    # grid study's trials are in.
+    _set_thresholds(monkeypatch)
+    study = optuna.create_study(directions=["minimize", "maximize"])
+    _add_trial(study, distance_atr_ratio=1.5, distance_atr_std=0.5, volatility_ratio=0.5)
+    _add_trial(study, distance_atr_ratio=3.0, distance_atr_std=0.5, volatility_ratio=0.5)
+    assert "constraints" not in study.trials[0].system_attrs
+
+    result = get_feasible_trials(study)
+
+    assert len(result) == 1
+
+
+def test_get_feasible_trials_excludes_non_complete_trials(monkeypatch):
+    _set_thresholds(monkeypatch)
+    study = optuna.create_study(directions=["minimize", "maximize"])
+    _add_trial(study, state=TrialState.PRUNED, distance_atr_ratio=1.5, distance_atr_std=0.5, volatility_ratio=0.5)
+    _add_trial(study, state=TrialState.FAIL, distance_atr_ratio=1.5, distance_atr_std=0.5, volatility_ratio=0.5)
+
+    assert get_feasible_trials(study) == []
+
+
+def test_get_feasible_trials_empty_study_returns_empty_list():
+    study = optuna.create_study(directions=["minimize", "maximize"])
+
+    assert get_feasible_trials(study) == []
+
+
+def test_get_feasible_trials_missing_attrs_are_excluded():
+    study = optuna.create_study(directions=["minimize", "maximize"])
+    _add_trial(study)  # no user_attrs at all -> FAILED_TRIAL_VALUE on all three constraints
+
+    assert get_feasible_trials(study) == []
 
 
 # _resolve_trial_count
@@ -249,6 +338,33 @@ def test_objective_happy_path_sets_user_attrs_and_returns_score_tuple(monkeypatc
     }
     assert len(cleared) == 1
     assert cleared[0][0][1] == f"*_{trial.number}.csv"
+
+    stored = trial.storage.get_trial(trial._trial_id)
+    assert stored.system_attrs["constraints"] == (0.0, 0.0, 0.0)
+
+
+def test_objective_sets_constraints_system_attr_even_for_grid_studies(monkeypatch):
+    # optuna-dashboard reads the "constraints" system_attr to show
+    # feasibility, but GridSampler never calls constraints_func -- so
+    # objective() must write it itself, regardless of which sampler the
+    # study uses, or a grid study's trials would show no feasibility at all.
+    _set_thresholds(monkeypatch)
+    metrics = BaselineMetrics(
+        whipsaw_frequency=10.0, avg_bars_held=9.0, distance_atr_ratio=3.0,
+        capture_efficiency=0.8, distance_atr_std=0.4, volatility_ratio=0.5,
+    )
+    monkeypatch.setattr(phase1_optimizer, "evaluate_trial", lambda **kwargs: metrics)
+    monkeypatch.setattr(phase1_optimizer, "clear_external_files", lambda *a, **k: None)
+    study = optuna.create_study(
+        directions=["minimize", "maximize"],
+        sampler=optuna.samplers.GridSampler({"p1": [1]}),
+    )
+    trial = study.ask()
+
+    objective(trial, "EMA", ["EURUSD"], {}, [IntParam(1, 1)])
+
+    stored = trial.storage.get_trial(trial._trial_id)
+    assert stored.system_attrs["constraints"] == pytest.approx((1.0, 0.0, 0.0))  # 3.0 - 2.0
 
 
 def test_objective_passes_suggested_parameters_and_indicator_name_to_evaluate_trial(monkeypatch):

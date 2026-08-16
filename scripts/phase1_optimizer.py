@@ -59,6 +59,20 @@ def get_constraint_violations(trial):
     return (distance_violation, distance_std_violation, volatility_violation)
 
 
+def get_feasible_trials(study: optuna.Study) -> list[optuna.trial.FrozenTrial]:
+    """Return this study's COMPLETE trials that satisfy every constraint in
+    get_constraint_violations, judged directly from each trial's user_attrs
+    rather than relying on Optuna's own feasibility bookkeeping.
+
+    That bookkeeping (trial.system_attrs["constraints"]) is only ever
+    populated for nsga2 studies -- GridSampler never calls constraints_func
+    (see build_sampler), so a grid study's trials carry no feasibility
+    signal unless it's computed here. Checking real thresholds this way
+    works uniformly for both samplers."""
+    completed = study.get_trials(deepcopy=False, states=(optuna.trial.TrialState.COMPLETE,))
+    return [t for t in completed if all(v <= 0 for v in get_constraint_violations(t))]
+
+
 def objective(trial: optuna.Trial, indicator_name: str, currencies: list, cached_data: dict, param_space: ParamSpace):
 
     trial_number = trial.number
@@ -83,6 +97,17 @@ def objective(trial: optuna.Trial, indicator_name: str, currencies: list, cached
     trial.set_user_attr("avg_bars_held", metrics.avg_bars_held)
     trial.set_user_attr("capture_efficiency", metrics.capture_efficiency)
     trial.set_user_attr("volatility_ratio", metrics.volatility_ratio)
+
+    # Written unconditionally (not just for nsga2, where NSGAIISampler's own
+    # after_trial would set the same key from the same inputs anyway) so
+    # optuna-dashboard can render feasibility for grid studies too --
+    # GridSampler never calls constraints_func, so without this a grid
+    # trial's "constraints" system_attr would simply never exist. Written
+    # via storage directly (Trial.set_system_attr is deprecated) using the
+    # "constraints" key Optuna's own NSGAII sampler uses (see
+    # optuna.samplers._base._CONSTRAINTS_KEY) so the dashboard picks it up
+    # the same way for both sampler kinds.
+    trial.storage.set_trial_system_attr(trial._trial_id, "constraints", get_constraint_violations(trial))
 
     if metrics.whipsaw_frequency is None or metrics.capture_efficiency is None:
         raise optuna.exceptions.TrialPruned()
