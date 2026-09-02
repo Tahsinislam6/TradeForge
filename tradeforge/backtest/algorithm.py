@@ -152,59 +152,41 @@ class NNFXBaseStrategy(bt.Strategy):
             state.t2_entry_price = None
             return
 
-    def _enter_long(self, data):
-        tp, sl, size1, size2 = self._calculate_order_details(long=True, data=data)
+    def _enter(self, data, long: bool):
+        tp, sl, size1, size2 = self._calculate_order_details(long=long, data=data)
         state = self._state[id(data)]
-        if size1 > 0:
-            t1 = self.buy_bracket(
+        if size1 <= 0:
+            return
+
+        bracket = self.buy_bracket if long else self.sell_bracket
+        t1 = bracket(
+            data=data,
+            size=size1,
+            exectype=bt.Order.Market,
+            stopprice=sl,
+            limitprice=tp,
+        )
+        state.t1_main_order, state.t1_sl_order, state.t1_tp_order = t1
+
+        state.t2_main_order = state.t2_sl_order = None
+        state.t2_long = state.t2_entry_price = None
+        if size2 > 0:
+            t2 = bracket(
                 data=data,
-                size=size1,
+                size=size2,
                 exectype=bt.Order.Market,
                 stopprice=sl,
-                limitprice=tp,
+                limitprice=None,
+                limitexec=None,
             )
-            state.t1_main_order, state.t1_sl_order, state.t1_tp_order = t1
+            state.t2_main_order, state.t2_sl_order, _ = t2
+            state.t2_long = long
 
-            state.t2_main_order = state.t2_sl_order = None
-            state.t2_long = state.t2_entry_price = None
-            if size2 > 0:
-                t2 = self.buy_bracket(
-                    data=data,
-                    size=size2,
-                    exectype=bt.Order.Market,
-                    stopprice=sl,
-                    limitprice=None,
-                    limitexec=None,
-                )
-                state.t2_main_order, state.t2_sl_order, _ = t2
-                state.t2_long = True
+    def _enter_long(self, data):
+        self._enter(data, long=True)
 
     def _enter_short(self, data):
-        tp, sl, size1, size2 = self._calculate_order_details(long=False, data=data)
-        state = self._state[id(data)]
-        if size1 > 0:
-            t1 = self.sell_bracket(
-                data=data,
-                size=size1,
-                exectype=bt.Order.Market,
-                stopprice=sl,
-                limitprice=tp,
-            )
-            state.t1_main_order, state.t1_sl_order, state.t1_tp_order = t1
-
-            state.t2_main_order = state.t2_sl_order = None
-            state.t2_long = state.t2_entry_price = None
-            if size2 > 0:
-                t2 = self.sell_bracket(
-                    data=data,
-                    size=size2,
-                    exectype=bt.Order.Market,
-                    stopprice=sl,
-                    limitprice=None,
-                    limitexec=None,
-                )
-                state.t2_main_order, state.t2_sl_order, _ = t2
-                state.t2_long = False
+        self._enter(data, long=False)
 
     def next(self):
         for data in self.datas:
@@ -212,8 +194,19 @@ class NNFXBaseStrategy(bt.Strategy):
 
     def _process_data(self, data):
         state = self._state[id(data)]
-        line_val = self.p.baseline.line(data)[0]
-        if line_val != line_val or line_val == 0:
+        # NaN-only: the data loader already turns each indicator's own
+        # warmup placeholder into NaN (see _nan_leading_warmup), whatever
+        # sentinel value it happens to use, so a bare 0 reading past that
+        # point is real data, not a warmup artifact -- true for baseline,
+        # but not guaranteed for every C1 (e.g. an alternating-buffer
+        # indicator can legitimately read 0 mid-series).
+        for ind in self._indicators:
+            line_val = ind.line(data)[0]
+            if line_val != line_val:
+                return
+        # Baseline is the one line here guaranteed to never be a real 0
+        # (an FX price is never exactly zero), so it keeps this extra check.
+        if self.p.baseline.line(data)[0] == 0:
             return
         if state.atr[0] != state.atr[0] or state.atr[0] == 0:
             return
@@ -275,15 +268,15 @@ class Phase2Strategy(NNFXBaseStrategy):
         self._indicators.append(self.p.c1)
 
 
-# Phase 3 — Baseline + C1 + independent exit indicator
+# Phase 5 — Baseline + C1 + independent exit indicator
 #
 # The exit indicator is a second, separate channel from self._indicators
 # (entry-gating stays exactly [baseline, c1], untouched from Phase 2): it's
 # checked only against open positions, in _process_data, and never required
-# to agree at entry time. See PHASE3_EXIT_DEVELOPMENT_PLAN.md for why this
+# to agree at entry time. See PHASE5_EXIT_DEVELOPMENT_PLAN.md for why this
 # can't just reuse the Phase2Strategy pattern of appending to _indicators.
 
-class Phase3Strategy(Phase2Strategy):
+class Phase5Strategy(Phase2Strategy):
 
     params = dict(exit_indicator=None)
 

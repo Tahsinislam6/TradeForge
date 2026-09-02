@@ -8,7 +8,7 @@ import optuna
 from functools import partial
 
 from scripts.run_backtest import request_and_load_many, run_backtest
-from tradeforge.backtest.algorithm import Phase2Strategy, Phase3Strategy
+from tradeforge.backtest.algorithm import Phase2Strategy, Phase5Strategy
 from tradeforge.backtest.candidates.exit_candidates import EXIT_CANDIDATES
 from tradeforge.backtest.candidates.candidate_types import ExitCandidate
 from tradeforge.backtest.candidates.param_space import build_sampler, fixed_values, grid_trial_count, suggest_params
@@ -28,7 +28,7 @@ from tradeforge.utils.notification import send_notification
 FAILED_TRIAL_VALUE = 1e6
 MIN_TRADES = 200
 
-# Step 3.4 hard constraints (see PHASE3_EXIT_DEVELOPMENT_PLAN.md): each exit
+# Step 3.4 hard constraints (see PHASE5_EXIT_DEVELOPMENT_PLAN.md): each exit
 # candidate is scored against Step 3's one-time Phase2Strategy reference run
 # (see compute_reference), not an absolute threshold -- an exit indicator
 # only earns a freeze if it demonstrably improves on "no exit indicator at
@@ -43,7 +43,7 @@ MAX_PCT_WINNERS_CLOSED_EARLY = 30.0  # proxy from PairedTradeAnalyzer's exit-rea
 # constraints (not the score) are what decides feasibility. 60/40 weights
 # avg_loss_reduction over win_rate_lift because avg_loss reduction is this
 # phase's whole point (an exit indicator that also lifts win rate is a
-# bonus, not the goal) -- see PHASE3_EXIT_DEVELOPMENT_PLAN.md's "Open
+# bonus, not the goal) -- see PHASE5_EXIT_DEVELOPMENT_PLAN.md's "Open
 # decision" note on Step 6.
 AVG_LOSS_REDUCTION_SCORE_CAP = 50.0
 WIN_RATE_LIFT_SCORE_CAP      = 15.0
@@ -52,13 +52,13 @@ WIN_RATE_LIFT_SCORE_CAP      = 15.0
 # TODO: fill in with the frozen Phase 1 baseline + Phase 2 C1 (see
 # phase2_best_trials.csv's feasible row(s) -- document the freeze decision
 # before setting these, same as Phase 1/2's own Decision Rule).
-BASELINE = PriceCrossIndicator(name="mcginley", parameters=[29, 1, 11, 1], buffer_values=[0], label="Baseline")
-C1 = LineCrossIndicator(name="Fisher", parameters=[21, 0.4, 0.8], buffer_values=[0], label="C1")
+BASELINE = PriceCrossIndicator(name="Baseline", parameters=[29, 1, 11, 1], buffer_values=[0], label="Baseline")
+C1 = LineCrossIndicator(name="C1", parameters=[21, 0.4, 0.8], buffer_values=[0], label="C1")
 
 
-def load_phase3_cache(currencies: list[str], baseline: Indicator, c1: Indicator) -> dict:
+def load_phase5_cache(currencies: list[str], baseline: Indicator, c1: Indicator) -> dict:
     """Load static OHLC/ATR data and fetch the fixed baseline + C1 from MT4
-    once, merged together. Both are frozen for the whole Phase 3 sweep (an
+    once, merged together. Both are frozen for the whole Phase 5 sweep (an
     exit indicator never changes them), so callers sweeping multiple exit
     candidates should call this once and reuse the result instead of
     re-fetching per candidate -- same reuse logic as Phase 2's
@@ -78,7 +78,7 @@ def load_phase3_cache(currencies: list[str], baseline: Indicator, c1: Indicator)
 
 def compute_reference(currencies: list[str], baseline: Indicator, c1: Indicator, cached_data: dict) -> dict:
     """Run Phase2Strategy (baseline + C1, no exit indicator) once against
-    `cached_data` to produce the reference numbers every Phase 3 exit
+    `cached_data` to produce the reference numbers every Phase 5 exit
     candidate is diffed against. Compute this once and hold it as a constant
     for the whole sweep -- never recompute per trial."""
     summary = run_backtest(
@@ -157,7 +157,7 @@ def objective(
             currencies=currencies,
             baseline=baseline,
             c1=c1,
-            strategy=Phase3Strategy,
+            strategy=Phase5Strategy,
             trial=trial.number,
             plot=False,
             cached_data=cached_data,
@@ -195,7 +195,7 @@ def objective(
     return score
 
 
-BEST_TRIALS_CSV = Path(__file__).parent.parent / "phase3_best_trials.csv"
+BEST_TRIALS_CSV = Path(__file__).parent.parent / "phase5_best_trials.csv"
 OPTUNA_JOURNAL_PATH = str(Path(__file__).parent.parent / "optuna_journal.log")
 # optuna-dashboard --storage-class JournalFileStorage optuna_journal.log
 
@@ -301,7 +301,7 @@ def run_optimization(
     n_jobs: int = 1,
 ) -> optuna.Study:
     """Run an Optuna optimisation over one exit-indicator candidate's
-    parameters. Holds baseline + C1 fixed and scores real Phase3Strategy
+    parameters. Holds baseline + C1 fixed and scores real Phase5Strategy
     backtests against Step 3's one-time reference run (see compute_reference)
     by a weighted combination of avg_loss_reduction_pct and win_rate_lift.
     With the default "nsga2" sampler this also enforces Step 3.4's hard
@@ -316,7 +316,7 @@ def run_optimization(
             If exit_spec.n_trials is set, it overrides n_trials for this run.
         n_trials: Default trial count if exit_spec.n_trials isn't set.
         cached_data: Pre-loaded static+baseline+C1 data from
-            load_phase3_cache. Loaded internally if omitted.
+            load_phase5_cache. Loaded internally if omitted.
         reference: Step 3's one-time Phase2Strategy reference numbers (from
             compute_reference). Computed internally if omitted.
         n_jobs: Number of worker processes to split n_trials across, same
@@ -326,7 +326,7 @@ def run_optimization(
         The completed optuna.Study object.
     """
     if cached_data is None:
-        cached_data = load_phase3_cache(currencies, baseline, c1)
+        cached_data = load_phase5_cache(currencies, baseline, c1)
     if reference is None:
         reference = compute_reference(currencies, baseline, c1, cached_data)
 
@@ -342,7 +342,7 @@ def run_optimization(
 
     fixed = fixed_values(exit_spec.param_space)
     run_code = secrets.token_hex(3)
-    study_name = f"{run_code}_{exit_spec.name}_phase3_optimization"
+    study_name = f"{run_code}_{exit_spec.name}_phase5_optimization"
     study = optuna.create_study(
         direction="maximize",
         sampler=_build_sampler(exit_spec),
@@ -361,7 +361,7 @@ def run_optimization(
 
     if n_jobs > 1:
         # baseline/c1 are long-lived Indicators reused by reference across
-        # every trial/candidate (see load_phase3_cache) -- reset both before
+        # every trial/candidate (see load_phase5_cache) -- reset both before
         # dispatch, same pickling reasoning as phase2_optimizer.py's
         # run_optimization (live backtrader Line/CrossOver objects stashed
         # by setup() can't cross the process boundary).
@@ -393,9 +393,9 @@ def run_all(
     """Sweep every candidate in `candidates` against the fixed `baseline`+`c1`,
     one Optuna study each. A candidate that fails outright is logged and
     skipped so it doesn't abort the rest of the batch. The only Telegram
-    notification sent is a plain "Phase 3 complete" once the whole batch is
+    notification sent is a plain "Phase 5 complete" once the whole batch is
     done."""
-    cached_data = load_phase3_cache(currencies, baseline, c1)
+    cached_data = load_phase5_cache(currencies, baseline, c1)
     reference = compute_reference(currencies, baseline, c1, cached_data)
 
     completed, failed, studies = [], [], []
@@ -421,12 +421,12 @@ def run_all(
         completed.append(exit_spec.name)
 
     export_best_trials(studies)
-    print(f"Phase 3 batch complete. Completed: {completed or 'none'}. Failed: {failed or 'none'}.")
-    send_notification("Phase 3 complete")
+    print(f"Phase 5 batch complete. Completed: {completed or 'none'}. Failed: {failed or 'none'}.")
+    send_notification("Phase 5 complete")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run NSGA-II Phase 3 (exit indicator) optimisation against a fixed baseline+C1.")
+    parser = argparse.ArgumentParser(description="Run NSGA-II Phase 5 (exit indicator) optimisation against a fixed baseline+C1.")
     parser.add_argument("currency", type=str, nargs="?", default=None,
                          help="Currency pair (e.g. EURUSD_SB). Defaults to a single portfolio "
                               "optimization across every currency in Config.IN_SAMPLE.")
@@ -444,7 +444,7 @@ if __name__ == "__main__":
 
     if BASELINE is None or C1 is None:
         raise SystemExit(
-            "BASELINE/C1 aren't set in scripts/phase3_optimizer.py -- freeze Phase 1's "
+            "BASELINE/C1 aren't set in scripts/phase5_optimizer.py -- freeze Phase 1's "
             "baseline and Phase 2's C1 first (see phase2_best_trials.csv), document the "
             "decision, then fill in the BASELINE/C1 constants at the top of this file."
         )

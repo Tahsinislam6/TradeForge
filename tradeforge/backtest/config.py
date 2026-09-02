@@ -4,6 +4,17 @@ from enum import Enum
 import backtrader as bt
 
 
+# MT4's conventional "no value" sentinel (EMPTY_VALUE) -- some custom
+# indicators mark not-yet-computed/inactive buffer positions with this
+# instead of leaving them at the raw 0.0 array default. Only guarded on
+# LineCrossIndicator (a lone value compared against a constant cross_level,
+# where this sentinel can never be a legitimate reading): TwoLineCrossIndicator
+# candidates like SuperTrend use it as an ongoing "which side is active" flag
+# on roughly half of all bars by design, and its existing fast-vs-slow
+# comparison already resolves that correctly without help.
+MT4_EMPTY_VALUE = 2147483647.0
+
+
 class Signal(Enum):
     LONG  =  1
     SHORT = -1
@@ -11,24 +22,30 @@ class Signal(Enum):
 
 
 class ExitReason(Enum):
-    """Why a position closed -- tagged by Phase3Strategy at the point it
+    """Why a position closed -- tagged by Phase5Strategy at the point it
     initiates (or detects) the close, and carried through by
     PairedTradeAnalyzer for the Step-3.4 exit-quality metrics."""
     STOP_LOSS      = "stop_loss"       # 1.5x ATR bracket stop (t1 or un-moved t2)
     TAKE_PROFIT    = "take_profit"     # t1's 1x ATR limit
     BREAKEVEN_STOP = "breakeven_stop"  # t2's stop, moved to entry after t1 TP fills
-    EXIT_INDICATOR = "exit_indicator"  # Phase 3's exit indicator crossed against the position
+    EXIT_INDICATOR = "exit_indicator"  # Phase 5's exit indicator crossed against the position
     DISAGREEMENT   = "disagreement"    # baseline/C1 stopped agreeing on direction
 
 
 class Indicator(ABC):
     def __init__(self, name: str, parameters: list, buffer_values: list[int],
-                 label: str, reverse: bool = False):
+                 label: str, reverse: bool = False, max_warmup_bars: int | None = None):
         self.name = name
         self.parameters = parameters
         self.buffer_values = buffer_values
         self.label = label
         self.reverse = reverse
+        # Upper bound on a genuine MT4 warmup run for this specific instance
+        # (see candidates.param_space.max_warmup_bars, which derives it from
+        # a param_space entry marked is_period=True) -- passed straight
+        # through to load_indicator by request_and_load_many. None leaves
+        # the loader's leading-warmup trim unbounded for this indicator.
+        self.max_warmup_bars = max_warmup_bars
 
     @property
     def num_buffers(self) -> int:
@@ -181,10 +198,14 @@ class LineCrossIndicator(Indicator):
         return self._line[id(data)]
 
     def crossed(self, data) -> bool:
+        if self._line[id(data)][0] == MT4_EMPTY_VALUE:
+            return False
         return self._cross[id(data)][0] != 0
 
     def direction(self, data) -> Signal:
         line = self._line[id(data)]
+        if line[0] == MT4_EMPTY_VALUE:
+            return Signal.NONE
         if line[0] > self.cross_level:
             return self._maybe_reverse(Signal.LONG)
         if line[0] < self.cross_level:

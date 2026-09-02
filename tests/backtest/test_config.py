@@ -4,6 +4,7 @@ import pytest
 
 from tradeforge.backtest.bt_feed import make_bt_feed
 from tradeforge.backtest.config import (
+    MT4_EMPTY_VALUE,
     LineCrossIndicator,
     PriceCrossIndicator,
     Signal,
@@ -163,9 +164,31 @@ def test_line_cross_direction_reverse_flips_short_to_long():
 def test_line_cross_crossed_true_for_nonzero_cross_value():
     ind = _line_cross()
     data = object()
+    ind._line[id(data)] = [-1.0]
     ind._cross[id(data)] = [-1]
 
     assert ind.crossed(data) is True
+
+
+def test_line_cross_crossed_false_when_line_is_empty_value():
+    """MT4's EMPTY_VALUE sentinel (2147483647.0) marks a not-yet-computed
+    buffer position on some custom indicators -- see MT4_EMPTY_VALUE. A
+    stale/leftover CrossOver reading from the transition into or out of
+    that state must not register as a real signal."""
+    ind = _line_cross()
+    data = object()
+    ind._line[id(data)] = [MT4_EMPTY_VALUE]
+    ind._cross[id(data)] = [-1]
+
+    assert ind.crossed(data) is False
+
+
+def test_line_cross_direction_none_when_line_is_empty_value():
+    ind = _line_cross(cross_level=5.0)
+    data = object()
+    ind._line[id(data)] = [MT4_EMPTY_VALUE]
+
+    assert ind.direction(data) == Signal.NONE
 
 
 def test_line_cross_reset_clears_bindings():

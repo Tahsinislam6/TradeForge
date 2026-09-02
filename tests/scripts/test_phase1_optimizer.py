@@ -6,7 +6,7 @@ from optuna.trial import TrialState, create_trial
 
 import scripts.phase1_optimizer as phase1_optimizer
 import scripts.phase2_optimizer as phase2_optimizer
-import scripts.phase3_optimizer as phase3_optimizer
+import scripts.phase5_optimizer as phase5_optimizer
 from scripts.phase1_optimizer import (
     FAILED_TRIAL_VALUE,
     OPTUNA_JOURNAL_PATH,
@@ -542,14 +542,14 @@ def test_run_optimization_uses_journal_storage(monkeypatch):
     assert isinstance(captured["create_study_kwargs"]["storage"], JournalStorage)
 
 
-# OPTUNA_JOURNAL_PATH shared with phase2/phase3
+# OPTUNA_JOURNAL_PATH shared with phase2/phase5
 
 def test_optuna_journal_path_shared_with_other_phases():
     # Phase 1/2/3 must all point at the same journal log so a single file
     # holds every phase's studies -- each study name is randomly-coded and
     # phase-tagged (see run_optimization), so sharing one file is safe and
     # is exactly what "same journal storage as p2 and p3" means here.
-    assert OPTUNA_JOURNAL_PATH == phase2_optimizer.OPTUNA_JOURNAL_PATH == phase3_optimizer.OPTUNA_JOURNAL_PATH
+    assert OPTUNA_JOURNAL_PATH == phase2_optimizer.OPTUNA_JOURNAL_PATH == phase5_optimizer.OPTUNA_JOURNAL_PATH
 
 
 # _journal_storage
@@ -646,7 +646,7 @@ def test_run_optimization_n_jobs_dispatches_split_counts_and_reloads_study(tmp_p
     assert len(captured["counts"]) == 2
     assert len(study.trials) == 5
 
-
+@pytest.mark.filterwarnings("ignore::optuna.exceptions.ExperimentalWarning")
 def test_run_optimization_n_jobs_exceeding_trials_drops_empty_workers(tmp_path, monkeypatch):
     storage = str(tmp_path / "journal.log")
     monkeypatch.setattr(phase1_optimizer, "OPTUNA_JOURNAL_PATH", storage)

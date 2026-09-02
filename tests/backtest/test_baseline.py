@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from tradeforge.backtest.baseline import (
+    MIN_REFERENCE_ATR_MULTIPLIER,
     BaselineCurrencyTest,
     BaselineMetrics,
     _aggregate,
@@ -211,6 +212,53 @@ def test_capture_efficiency_direction_down_computes_ratio():
     assert result == pytest.approx(0.3)
 
 
+def test_capture_efficiency_reference_move_below_floor_returns_nan():
+    """A genuine but tiny reference swing (e.g. a double-top/bottom bracket)
+    must not be divided into -- it should be excluded like a missing pivot."""
+    pivot_positions = np.array([10, 20])
+    pivot_prices = np.array([100.0, 100.005])  # reference_move = 0.005
+
+    result = _capture_efficiency_for_run(
+        12, 18, 1, 101.0, 104.0, pivot_positions, pivot_prices, min_reference_move=1.0
+    )
+
+    assert np.isnan(result)
+
+
+def test_capture_efficiency_reference_move_equal_to_floor_computes_ratio():
+    """The floor is exclusive: a reference_move exactly at the floor still counts."""
+    pivot_positions = np.array([10, 20])
+    pivot_prices = np.array([100.0, 101.0])  # reference_move = 1.0
+
+    result = _capture_efficiency_for_run(
+        12, 18, 1, 101.0, 104.0, pivot_positions, pivot_prices, min_reference_move=1.0
+    )
+
+    assert result == pytest.approx(3.0)
+
+
+def test_capture_efficiency_reference_move_above_floor_computes_ratio():
+    pivot_positions = np.array([10, 20])
+    pivot_prices = np.array([100.0, 110.0])  # reference_move = 10.0
+
+    result = _capture_efficiency_for_run(
+        12, 18, 1, 101.0, 104.0, pivot_positions, pivot_prices, min_reference_move=1.0
+    )
+
+    assert result == pytest.approx(0.3)
+
+
+def test_capture_efficiency_default_min_reference_move_is_zero():
+    """Callers that don't pass min_reference_move (e.g. scripts/debug.py) keep
+    the old behaviour: any positive reference_move is used as-is."""
+    pivot_positions = np.array([10, 20])
+    pivot_prices = np.array([100.0, 100.00001])
+
+    result = _capture_efficiency_for_run(12, 18, 1, 101.0, 104.0, pivot_positions, pivot_prices)
+
+    assert not np.isnan(result)
+
+
 # _segment_runs
 
 def _side_df(sides: list[int], **extra) -> pd.DataFrame:
@@ -224,7 +272,7 @@ def _side_df(sides: list[int], **extra) -> pd.DataFrame:
 def test_segment_runs_two_runs_drops_both_as_boundary_runs():
     df = _side_df([0, 0, 1, 1])
 
-    run_df = _segment_runs(df, has_zigzag=False)
+    run_df = _segment_runs(df, has_zigzag=False, has_atr=False)
 
     assert len(run_df) == 0
 
@@ -232,7 +280,7 @@ def test_segment_runs_two_runs_drops_both_as_boundary_runs():
 def test_segment_runs_three_runs_keeps_only_middle_run():
     df = _side_df([0, 0, 1, 1, 0, 0])
 
-    run_df = _segment_runs(df, has_zigzag=False)
+    run_df = _segment_runs(df, has_zigzag=False, has_atr=False)
 
     assert run_df["bars_held"].tolist() == [2]
 
@@ -240,7 +288,7 @@ def test_segment_runs_three_runs_keeps_only_middle_run():
 def test_segment_runs_bars_held_matches_run_lengths():
     df = _side_df([0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 1])
 
-    run_df = _segment_runs(df, has_zigzag=False)
+    run_df = _segment_runs(df, has_zigzag=False, has_atr=False)
 
     assert run_df["bars_held"].tolist() == [3, 4]
 
@@ -248,7 +296,7 @@ def test_segment_runs_bars_held_matches_run_lengths():
 def test_segment_runs_no_zigzag_capture_efficiency_all_nan():
     df = _side_df([0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 1])
 
-    run_df = _segment_runs(df, has_zigzag=False)
+    run_df = _segment_runs(df, has_zigzag=False, has_atr=False)
 
     assert run_df["capture_efficiency"].isna().all()
 
@@ -260,7 +308,7 @@ def test_segment_runs_zigzag_present_but_no_pivots_marked_capture_efficiency_all
         zigzag_price=[np.nan] * 11,
     )
 
-    run_df = _segment_runs(df, has_zigzag=True)
+    run_df = _segment_runs(df, has_zigzag=True, has_atr=False)
 
     assert run_df["capture_efficiency"].isna().all()
 
@@ -272,7 +320,7 @@ def test_segment_runs_zigzag_pivot_mask_ignores_zero_and_nan():
         zigzag_price=[1.0, np.nan, np.nan, np.nan, 2.0, np.nan, np.nan, np.nan, 1.5, np.nan, np.nan],
     )
 
-    run_df = _segment_runs(df, has_zigzag=True)
+    run_df = _segment_runs(df, has_zigzag=True, has_atr=False)
 
     # Middle runs are now bracketed by real pivots, so at least one ratio is computed.
     assert run_df["capture_efficiency"].notna().any()
@@ -281,10 +329,67 @@ def test_segment_runs_zigzag_pivot_mask_ignores_zero_and_nan():
 def test_segment_runs_does_not_mutate_input():
     df = _side_df([0, 0, 1, 1, 0, 0])
 
-    _segment_runs(df, has_zigzag=False)
+    _segment_runs(df, has_zigzag=False, has_atr=False)
 
     assert "_pos" not in df.columns
     assert "side" not in df.columns
+
+
+def test_segment_runs_atr_floor_excludes_degenerate_reference_swing():
+    """Regression test for the double-top/bottom bug: a pivot pair priced
+    almost identically (reference_move << ATR) must be excluded, not divided
+    into and left to produce a blown-up ratio."""
+    df = _side_df(
+        [0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 1],
+        atr=[1.0] * 11,
+        zigzag_pivot=[1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0],
+        # run1 bracketed by pivots 1.0 / 1.0005 -> reference_move=0.0005, way
+        # below the ATR floor (1.0 * MIN_REFERENCE_ATR_MULTIPLIER).
+        # run2 bracketed by pivots 1.0005 / 5.0 -> reference_move=3.9995, clears it.
+        zigzag_price=[1.0, np.nan, np.nan, np.nan, 1.0005, np.nan, np.nan, np.nan, 5.0, np.nan, np.nan],
+    )
+
+    run_df = _segment_runs(df, has_zigzag=True, has_atr=True)
+
+    assert np.isnan(run_df["capture_efficiency"].iloc[0])
+    assert run_df["capture_efficiency"].iloc[1] == pytest.approx(0.0)
+
+
+def test_segment_runs_no_atr_applies_zero_floor_even_for_tiny_reference_move():
+    """Without an ATR column there's no volatility scale to floor against, so
+    the old behaviour (any positive reference_move counts) is preserved."""
+    df = _side_df(
+        [0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 1],
+        zigzag_pivot=[1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0],
+        zigzag_price=[1.0, np.nan, np.nan, np.nan, 1.0005, np.nan, np.nan, np.nan, 5.0, np.nan, np.nan],
+    )
+
+    run_df = _segment_runs(df, has_zigzag=True, has_atr=False)
+
+    assert not np.isnan(run_df["capture_efficiency"].iloc[0])
+
+
+def test_segment_runs_atr_floor_uses_min_reference_atr_multiplier_constant():
+    """The floor is MIN_REFERENCE_ATR_MULTIPLIER x mean ATR of the run's own
+    bars, not a hardcoded number -- prove it by placing the reference_move
+    just below and just above that computed threshold."""
+    atr = 2.0
+    threshold = atr * MIN_REFERENCE_ATR_MULTIPLIER
+    df = _side_df(
+        [0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 1],
+        atr=[atr] * 11,
+        zigzag_pivot=[1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0],
+        zigzag_price=[
+            0.0, np.nan, np.nan, np.nan,
+            threshold - 0.01, np.nan, np.nan, np.nan,
+            threshold + 0.01 + (threshold - 0.01), np.nan, np.nan,
+        ],
+    )
+
+    run_df = _segment_runs(df, has_zigzag=True, has_atr=True)
+
+    assert np.isnan(run_df["capture_efficiency"].iloc[0])  # reference_move = threshold - 0.01
+    assert not np.isnan(run_df["capture_efficiency"].iloc[1])  # reference_move = threshold + 0.01
 
 
 # _whipsaw_and_avg_bars
@@ -294,16 +399,24 @@ def test_whipsaw_and_avg_bars_mixed_run_lengths():
 
     whipsaw_frequency, avg_bars_held = _whipsaw_and_avg_bars(run_df)
 
-    assert whipsaw_frequency == pytest.approx(60.0)
+    assert whipsaw_frequency == pytest.approx(20.0)
     assert avg_bars_held == pytest.approx(5.0)
 
 
-def test_whipsaw_and_avg_bars_exactly_five_bars_counts_as_whipsaw():
-    run_df = pd.DataFrame({"bars_held": [5]})
+def test_whipsaw_and_avg_bars_exactly_one_bar_counts_as_whipsaw():
+    run_df = pd.DataFrame({"bars_held": [1]})
 
     whipsaw_frequency, _ = _whipsaw_and_avg_bars(run_df)
 
     assert whipsaw_frequency == pytest.approx(100.0)
+
+
+def test_whipsaw_and_avg_bars_two_bars_does_not_count_as_whipsaw():
+    run_df = pd.DataFrame({"bars_held": [2]})
+
+    whipsaw_frequency, _ = _whipsaw_and_avg_bars(run_df)
+
+    assert whipsaw_frequency == pytest.approx(0.0)
 
 
 def test_whipsaw_and_avg_bars_all_long_runs_zero_percent():
@@ -370,7 +483,8 @@ def test_aggregate_empty_list_returns_none():
 # BaselineCurrencyTest._calculate_metrics
 
 # Same run pattern as _segment_runs' tests: 2 boundary runs dropped, valid
-# runs of length 3 and 4 remain -> whipsaw_frequency=100%, avg_bars_held=3.5.
+# runs of length 3 and 4 remain -> whipsaw_frequency=0% (neither run is
+# <=1 bar), avg_bars_held=3.5.
 _OSCILLATING_SIDES = [0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 1]
 
 
@@ -403,7 +517,7 @@ def test_calculate_metrics_missing_atr_and_zigzag_leaves_those_metrics_none():
     test = BaselineCurrencyTest("dummy.csv", pd.DataFrame())
     test._calculate_metrics(df)
 
-    assert test.whipsaw_frequency == pytest.approx(100.0)
+    assert test.whipsaw_frequency == pytest.approx(0.0)
     assert test.avg_bars_held == pytest.approx(3.5)
     assert test.run_bars_held == [3, 4]
     assert test.distance_atr_ratio is None
@@ -440,7 +554,7 @@ def test_calculate_metrics_full_happy_path_computes_all_metrics():
     test = BaselineCurrencyTest("dummy.csv", pd.DataFrame())
     test._calculate_metrics(df)
 
-    assert test.whipsaw_frequency == pytest.approx(100.0)
+    assert test.whipsaw_frequency == pytest.approx(0.0)
     assert test.avg_bars_held == pytest.approx(3.5)
     assert test.run_bars_held == [3, 4]
     assert test.capture_efficiency == pytest.approx(0.0)
@@ -468,7 +582,7 @@ def test_run_loads_indicator_and_merges_before_calculating_metrics(tmp_path):
     test = BaselineCurrencyTest(indicator_path, merged_df)
     test.run()
 
-    assert test.whipsaw_frequency == pytest.approx(100.0)
+    assert test.whipsaw_frequency == pytest.approx(0.0)
     assert test.avg_bars_held == pytest.approx(3.5)
     assert test.distance_atr_ratio == pytest.approx(0.5)
     assert test.distance_atr_std == pytest.approx(0.0)
@@ -499,7 +613,7 @@ def test_baseline_backtest_single_currency_happy_path(tmp_path, monkeypatch):
 
     metrics = baseline_backtest({currency: merged_df}, "Baseline")
 
-    assert metrics.whipsaw_frequency == pytest.approx(100.0)
+    assert metrics.whipsaw_frequency == pytest.approx(0.0)
     assert metrics.avg_bars_held == pytest.approx(3.5)
     assert metrics.distance_atr_ratio == pytest.approx(0.5)
 
@@ -558,7 +672,7 @@ def test_baseline_backtest_only_aggregates_successful_currencies(tmp_path, monke
 
     metrics = baseline_backtest({good_currency: good_df, bad_currency: bad_df}, "Baseline")
 
-    assert metrics.whipsaw_frequency == pytest.approx(100.0)
+    assert metrics.whipsaw_frequency == pytest.approx(0.0)
     assert metrics.avg_bars_held == pytest.approx(3.5)
 
 

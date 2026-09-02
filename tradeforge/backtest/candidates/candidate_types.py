@@ -38,10 +38,10 @@ class _IndicatorCandidate:
     with FixedParam (held constant) in whatever order the indicator expects
     its parameters.
 
-    C1Candidate (Phase 2) and ExitCandidate (Phase 3) are identical in every
+    C1Candidate (Phase 2) and ExitCandidate (Phase 5) are identical in every
     field -- an exit indicator is wired up the same way a C1 is, just
     checked against open positions instead of gating entries (see
-    Phase3Strategy in tradeforge/backtest/algorithm.py) -- so both subclass
+    Phase5Strategy in tradeforge/backtest/algorithm.py) -- so both subclass
     this instead of duplicating the shape. Kept as two distinct types rather
     than one shared class so a function signature like
     `exit_spec: ExitCandidate` stays self-documenting about which pipeline
@@ -49,7 +49,7 @@ class _IndicatorCandidate:
 
     sampler:
         "nsga2": stochastic multi-objective/constrained search. Each phase's
-            optimizer script (phase2_optimizer.py/phase3_optimizer.py)
+            optimizer script (phase2_optimizer.py/phase5_optimizer.py)
             supplies its own constraints_func with its own thresholds --
             see get_constraint_violations in each (the default).
         "grid": exhaustive sweep over param_space (IntParam/FloatParam
@@ -77,7 +77,7 @@ class C1Candidate(_IndicatorCandidate):
 
 @dataclass
 class ExitCandidate(_IndicatorCandidate):
-    """One exit indicator to sweep in a Phase 3 batch run. See
-    _IndicatorCandidate for field meanings. With sampler="nsga2", Phase 3's
+    """One exit indicator to sweep in a Phase 5 batch run. See
+    _IndicatorCandidate for field meanings. With sampler="nsga2", Phase 5's
     hard constraints are Step 3.4's avg_loss_reduction_pct/win_rate lift/
-    profit_factor/pct_winners_closed_early (scripts/phase3_optimizer.py)."""
+    profit_factor/pct_winners_closed_early (scripts/phase5_optimizer.py)."""

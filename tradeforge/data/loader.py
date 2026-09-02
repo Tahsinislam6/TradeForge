@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 import os
 
@@ -8,11 +9,60 @@ from tradeforge.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# ATR's own period, requested by load_static_data -- also used to bound how
+# many leading bars _load_cached_currency_data's ATR load will trust as
+# genuine warmup (see loader.load_indicator's max_warmup_bars / the
+# WARMUP_SAFETY_MULTIPLIER in candidates.param_space).
+ATR_PERIOD = 14
+
 def _require_columns(df: pd.DataFrame, expected: set[str]) -> None:
     """Raise if any of `expected` columns are missing from `df`."""
     missing = expected - set(df.columns)
     if missing:
         raise ValueError(f"CSV is missing required columns: {missing}")
+
+def _nan_leading_warmup(df: pd.DataFrame, value_cols: list[str], max_warmup_bars: int | None = None) -> pd.DataFrame:
+    """Replace each column's leading run of MT4 warmup-placeholder values
+    with NaN, in place of guessing a specific sentinel (0.0, MT4's
+    EMPTY_VALUE, or anything else a given custom indicator happens to use).
+
+    An indicator's very first available historical bar necessarily has zero
+    look-back, so whatever value it writes there is that column's own
+    placeholder for "not yet computed" -- taken as the sentinel to match,
+    and matched forward chronologically until the first bar the value
+    actually changes (a scattered recurrence of the same value deeper in
+    the series, e.g. a genuine oscillator reading of exactly 0, is real
+    data and left alone). If a column is that one value for its *entire*
+    span, there's no later bar proving it was ever a placeholder rather
+    than a genuinely constant reading, so it's left untouched.
+
+    Args:
+        max_warmup_bars: Upper bound on how long a genuine warmup run can
+            plausibly be (callers pass something derived from the
+            indicator's own period parameter, e.g. its largest configured
+            value x2 for slack). A run longer than this is judged to be
+            real, held-flat output that happens to start at the edge of
+            the export window -- e.g. a channel/step-line indicator that
+            didn't move for a long, quiet stretch of real price history --
+            rather than a placeholder, and is left alone. None disables
+            the check (matches the *entire-column-constant* exemption in
+            spirit, just without a bound).
+    """
+    dt = pd.to_datetime(df["DateTime"], format="%Y.%m.%d %H:%M", errors="coerce")
+    order = np.argsort(dt.to_numpy()) if dt.notna().all() else np.arange(len(df))
+
+    df = df.copy()
+    for col in value_cols:
+        vals = df[col].to_numpy(dtype=float)[order]
+        sentinel = vals[0]
+        same_as_sentinel = (vals == sentinel) | (np.isnan(vals) & np.isnan(sentinel))
+        if same_as_sentinel.all():
+            continue
+        run_len = int(np.argmin(same_as_sentinel))
+        if max_warmup_bars is not None and run_len > max_warmup_bars:
+            continue
+        df.iloc[order[:run_len], df.columns.get_loc(col)] = np.nan
+    return df
 
 def load_ohlc(file_path: str) -> pd.DataFrame:
     """Load OHLC data from a CSV file.
@@ -27,7 +77,8 @@ def load_ohlc(file_path: str) -> pd.DataFrame:
     _require_columns(df, {"DateTime", "Open", "High", "Low", "Close", "Volume"})
     return df
 
-def load_indicator(file_path:str, num_buffers: int, indicator_name: str | None) -> pd.DataFrame:
+def load_indicator(file_path: str, num_buffers: int, indicator_name: str | None,
+                    max_warmup_bars: int | None = None) -> pd.DataFrame:
     """Loads an N-buffer indicator CSV file into a pandas DataFrame.
 
     DateTime columns are expected. Renames buffer columns if indicator_name is
@@ -37,13 +88,16 @@ def load_indicator(file_path:str, num_buffers: int, indicator_name: str | None) 
         file_path: The path to the CSV file containing indicator data.
         num_buffers: The number of buffer columns expected in the CSV.
         indicator_name: Optional name to rename buffer columns with.
+        max_warmup_bars: Forwarded to _nan_leading_warmup -- see there.
 
     Returns:
         pd.DataFrame: A DataFrame containing the indicator data with renamed
             columns if indicator_name is provided.
     """
     df = pd.read_csv(file_path)
-    _require_columns(df, {"DateTime"} | {f'Buffer_Value_{i}' for i in range(num_buffers)})
+    buffer_cols = [f'Buffer_Value_{i}' for i in range(num_buffers)]
+    _require_columns(df, {"DateTime"} | set(buffer_cols))
+    df = _nan_leading_warmup(df, buffer_cols, max_warmup_bars=max_warmup_bars)
     if indicator_name:
         buffer_rename = {f'Buffer_Value_{i}': f'{indicator_name}_Buffer_{i}' for i in range(num_buffers)}
         df.rename(columns=buffer_rename, inplace=True)
@@ -86,7 +140,8 @@ def _load_cached_currency_data(currencies: list[str], common_dir: str) -> dict[s
         data = load_ohlc(ohlc_path)
 
         atr_path = os.path.join(common_dir, f"{currency}_ATR_1440_0.csv")
-        atr_df = load_indicator(atr_path, num_buffers=1, indicator_name="ATR")
+        # x2 slack matches WARMUP_SAFETY_MULTIPLIER (candidates.param_space).
+        atr_df = load_indicator(atr_path, num_buffers=1, indicator_name="ATR", max_warmup_bars=ATR_PERIOD * 2)
 
         cached_data[currency] = merge_dataframes(data, atr_df)
     return cached_data
@@ -107,7 +162,7 @@ def load_static_data(currencies: list[str]):
     if not request_ohlc(currencies):
         logger.error(f"Failed to request OHLC data from MT4 EA for {currencies}.")
         raise RuntimeError("Failed to request OHLC data from MT4 EA.")
-    if not request_indicator(currencies, parameters=14, indicator_name="ATR", buffer_values=0):
+    if not request_indicator(currencies, parameters=ATR_PERIOD, indicator_name="ATR", buffer_values=0):
         logger.error(f"Failed to request ATR indicator data from MT4 EA for {currencies}.")
         raise RuntimeError("Failed to request ATR indicator data from MT4 EA.")
 

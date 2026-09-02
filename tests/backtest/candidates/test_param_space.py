@@ -4,6 +4,7 @@ import optuna
 import pytest
 
 from tradeforge.backtest.candidates.param_space import (
+    WARMUP_SAFETY_MULTIPLIER,
     CategoricalParam,
     FixedParam,
     FloatParam,
@@ -13,8 +14,35 @@ from tradeforge.backtest.candidates.param_space import (
     grid_search_space,
     grid_trial_count,
     grid_values,
+    max_warmup_bars,
     suggest_params,
 )
+
+
+# max_warmup_bars
+
+def test_max_warmup_bars_none_when_no_param_marked_as_period():
+    param_space = [IntParam(1, 250), FixedParam(3)]
+
+    assert max_warmup_bars(param_space, [50, 3]) is None
+
+
+def test_max_warmup_bars_scales_marked_period_by_safety_multiplier():
+    param_space = [IntParam(1, 250, is_period=True), FloatParam(0.1, 10.0)]
+
+    assert max_warmup_bars(param_space, [150, 3.0]) == 150 * WARMUP_SAFETY_MULTIPLIER
+
+
+def test_max_warmup_bars_takes_largest_of_multiple_marked_periods():
+    param_space = [IntParam(1, 250, is_period=True), IntParam(1, 250, is_period=True)]
+
+    assert max_warmup_bars(param_space, [50, 150]) == 150 * WARMUP_SAFETY_MULTIPLIER
+
+
+def test_max_warmup_bars_ignores_unmarked_int_params():
+    param_space = [IntParam(1, 250, is_period=True), IntParam(1, 5000)]
+
+    assert max_warmup_bars(param_space, [50, 3500]) == 50 * WARMUP_SAFETY_MULTIPLIER
 
 
 # CategoricalParam.values

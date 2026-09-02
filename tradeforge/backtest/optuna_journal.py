@@ -1,5 +1,5 @@
 """Generic Optuna/JournalStorage/parallel-dispatch plumbing shared by every
-phaseN_optimizer.py script (phase2_optimizer.py, phase3_optimizer.py, ...).
+phaseN_optimizer.py script (phase2_optimizer.py, phase5_optimizer.py, ...).
 Nothing here knows about Indicator/C1Candidate/ExitCandidate or any other
 backtest-domain type -- each phase supplies its own objective function and
 that objective's argument list.

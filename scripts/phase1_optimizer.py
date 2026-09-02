@@ -30,7 +30,7 @@ from tradeforge.utils.notification import send_notification
 FAILED_TRIAL_VALUE = 1e6
 OPTUNA_JOURNAL_PATH = str(Path(__file__).parent.parent / "optuna_journal.log")
 # optuna-dashboard --storage-class JournalFileStorage optuna_journal.log
-# Shared with phase2_optimizer.py/phase3_optimizer.py -- every phase's study
+# Shared with phase2_optimizer.py/phase5_optimizer.py -- every phase's study
 # names are randomly-coded and phase-tagged (see run_optimization), so one
 # journal log can safely hold every phase's studies.
 
@@ -199,7 +199,7 @@ def run_optimization(
     independently of price) — see BaselineCandidate.sampler for the "grid"
     alternative and what it does/doesn't enforce. Results are persisted to a
     journal log at the project root (shared with phase2_optimizer.py and
-    phase3_optimizer.py -- see OPTUNA_JOURNAL_PATH), each run getting its
+    phase5_optimizer.py -- see OPTUNA_JOURNAL_PATH), each run getting its
     own randomly-coded study name so repeated runs never collide or resume
     into each other's trials.
 
@@ -216,7 +216,7 @@ def run_optimization(
         cached_data: Pre-loaded static+ZigZag data from load_baseline_data.
             Loaded internally if omitted, so this still works standalone.
         n_jobs: Number of worker processes to split n_trials across, same
-            semantics as phase2_optimizer.py/phase3_optimizer.py's
+            semantics as phase2_optimizer.py/phase5_optimizer.py's
             run_optimization. Default 1 runs trials sequentially in-process.
 
     Returns:
@@ -274,7 +274,7 @@ def run_all(
     misspelled MT4 indicator name) is logged and skipped so it doesn't abort
     the rest of the batch. `n_jobs` is forwarded to run_optimization for
     every candidate, same semantics as phase2_optimizer.py/
-    phase3_optimizer.py's run_all."""
+    phase5_optimizer.py's run_all."""
     cached_data = load_baseline_data(currencies)
 
     completed, failed = [], []

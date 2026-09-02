@@ -17,6 +17,13 @@ class IntParam:
     low: int
     high: int
     step: int = 1
+    # Marks this as the indicator's own lookback period (as opposed to a
+    # smoothing factor, threshold, or other int-valued knob) -- used to cap
+    # how many leading bars the data loader is willing to treat as MT4
+    # warmup placeholder (see loader._nan_leading_warmup's max_warmup_bars).
+    # Left False by default since not every IntParam is a period; mark the
+    # one(s) that actually are per candidate in c1_candidates.py.
+    is_period: bool = False
 
 
 @dataclass
@@ -53,6 +60,29 @@ class CategoricalParam:
 
 
 ParamSpace = list[IntParam | FloatParam | CategoricalParam | FixedParam]
+
+# How much slack to give a marked period param before the data loader gives
+# up trusting a leading constant run as genuine warmup and leaves it alone
+# instead (see loader._nan_leading_warmup) -- covers indicators whose
+# internal warmup needs a bit more than the raw period value (e.g. period +
+# a smoothing pass), without being so loose it stops rejecting a run that's
+# obviously too long to be warmup (see the "half trend" false-positive that
+# motivated this).
+WARMUP_SAFETY_MULTIPLIER = 2
+
+
+def max_warmup_bars(param_space: ParamSpace, resolved_params: list) -> int | None:
+    """The largest resolved value among param_space entries marked
+    is_period=True, scaled by WARMUP_SAFETY_MULTIPLIER -- the cap to pass
+    as load_indicator's max_warmup_bars for this specific trial's
+    parameters. None if no entry is marked (the loader then falls back to
+    its unbounded -- but still entire-column-constant-exempt -- behavior).
+    """
+    periods = [
+        value for spec, value in zip(param_space, resolved_params)
+        if isinstance(spec, IntParam) and spec.is_period
+    ]
+    return max(periods) * WARMUP_SAFETY_MULTIPLIER if periods else None
 
 
 def suggest_params(trial: optuna.Trial, param_space: ParamSpace) -> list:

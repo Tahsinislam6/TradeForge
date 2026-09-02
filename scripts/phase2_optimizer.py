@@ -11,7 +11,7 @@ from scripts.run_backtest import run_backtest, request_and_load_many
 from tradeforge.backtest.algorithm import Phase2Strategy
 from tradeforge.backtest.candidates.c1_candidates import C1_CANDIDATES
 from tradeforge.backtest.candidates.candidate_types import C1Candidate
-from tradeforge.backtest.candidates.param_space import build_sampler, fixed_values, grid_trial_count, suggest_params
+from tradeforge.backtest.candidates.param_space import build_sampler, fixed_values, grid_trial_count, max_warmup_bars, suggest_params
 from tradeforge.backtest.config import *
 from tradeforge.backtest.optuna_journal import (
     journal_storage as _journal_storage,
@@ -32,7 +32,7 @@ MIN_AVG_BARS_HELD = 8.0
 MAX_DRAWDOWN = 60.0
 # A trial below 1.0 is net-losing (gross_loss exceeds gross_profit); 0.9
 # sits just under that line so trials with a near-breakeven-but-not-quite
-# profit factor aren't discarded outright by Phase 2 alone -- Phase 3's
+# profit factor aren't discarded outright by Phase 2 alone -- Phase 5's
 # exit-indicator layer is where profitability is meant to get pushed the
 # rest of the way. This floor exists to block candidates like the Fisher
 # C1 sweep, which cleared every other constraint (trades/win_rate/bars
@@ -41,7 +41,7 @@ MIN_PROFIT_FACTOR = 0.9
 
 # ===== Parameters (edit these) =====
 # Fixed, already Phase-1-optimized baseline
-BASELINE = PriceCrossIndicator(name="VIDYA", parameters=[36,37], buffer_values=[0], label="Baseline")
+BASELINE = PriceCrossIndicator(name="Baseline", parameters=[32,2.6,18], buffer_values=[0], label="Baseline")
 
 
 def get_constraint_violations(trial, min_trades: int, min_win_rate: float, min_avg_bars_held: float, max_drawdown: float, min_profit_factor: float):
@@ -83,6 +83,7 @@ def objective(trial: optuna.Trial, currencies: list[str], baseline: Indicator, c
         buffer_values=c1_spec.buffer_values,
         label=label,
         reverse=c1_spec.reverse,
+        max_warmup_bars=max_warmup_bars(c1_spec.param_space, parameters),
     )
     if c1_spec.cls is LineCrossIndicator:
         c1_kwargs["cross_level"] = c1_spec.cross_level
