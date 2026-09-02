@@ -7,7 +7,7 @@ from tradeforge.backtest.algorithm import (
     NNFXBaseStrategy,
     Phase1Strategy,
     Phase2Strategy,
-    Phase3Strategy,
+    Phase5Strategy,
     _TwoTradeDataState,
 )
 from tradeforge.backtest.config import ExitReason, Signal
@@ -517,6 +517,35 @@ def test_process_data_skips_when_atr_is_zero():
     assert recorded == []
 
 
+def test_process_data_does_not_skip_when_second_indicator_line_is_zero():
+    """A C1 line reading 0.0 is not, by itself, treated as invalid: the
+    data loader already turns each indicator's own warmup placeholder into
+    NaN (see loader._nan_leading_warmup, whatever sentinel a given
+    indicator actually uses), so a real 0 past that point is legitimate
+    data for indicators that can genuinely read 0 mid-series (e.g. an
+    alternating-buffer C1) -- only baseline keeps an explicit ==0 check,
+    since price is never truly zero."""
+    strategy, data, recorded = _ready_strategy(direction=Signal.LONG)
+    c1 = _FakeIndicator()
+    c1.set_for(data, crossed=True, direction=Signal.LONG, line_value=0.0)
+    strategy._indicators.append(c1)
+
+    strategy._process_data(data)
+
+    assert recorded == [("enter_long", data)]
+
+
+def test_process_data_skips_when_second_indicator_line_is_nan():
+    strategy, data, recorded = _ready_strategy(direction=Signal.LONG)
+    c1 = _FakeIndicator()
+    c1.set_for(data, crossed=True, direction=Signal.LONG, line_value=float("nan"))
+    strategy._indicators.append(c1)
+
+    strategy._process_data(data)
+
+    assert recorded == []
+
+
 def test_process_data_skips_when_nothing_crossed():
     strategy, data, recorded = _ready_strategy(crossed=False)
 
@@ -745,10 +774,10 @@ def test_phase2_strategy_init_wires_c1_for_each_data():
     assert c1.setup_calls == [(strategy, data1, False), (strategy, data2, False)]
 
 
-# Phase3Strategy __init__ wiring
+# Phase5Strategy __init__ wiring
 
-def test_phase3_strategy_init_wires_exit_indicator_but_not_into_indicators_list():
-    strategy = _new_strategy(Phase3Strategy)
+def test_phase5_strategy_init_wires_exit_indicator_but_not_into_indicators_list():
+    strategy = _new_strategy(Phase5Strategy)
     baseline = _FakeIndicator()
     c1 = _FakeIndicator()
     exit_indicator = _FakeIndicator()
@@ -758,7 +787,7 @@ def test_phase3_strategy_init_wires_exit_indicator_but_not_into_indicators_list(
     )
     strategy.datas = [data]
 
-    Phase3Strategy.__init__(strategy)
+    Phase5Strategy.__init__(strategy)
 
     assert exit_indicator.reset_calls == 1
     assert exit_indicator.setup_calls == [(strategy, data, False)]
@@ -767,8 +796,8 @@ def test_phase3_strategy_init_wires_exit_indicator_but_not_into_indicators_list(
     assert strategy._indicators == [baseline, c1]
 
 
-def test_phase3_strategy_init_wires_exit_indicator_for_each_data():
-    strategy = _new_strategy(Phase3Strategy)
+def test_phase5_strategy_init_wires_exit_indicator_for_each_data():
+    strategy = _new_strategy(Phase5Strategy)
     baseline = _FakeIndicator()
     c1 = _FakeIndicator()
     exit_indicator = _FakeIndicator()
@@ -778,16 +807,16 @@ def test_phase3_strategy_init_wires_exit_indicator_for_each_data():
     )
     strategy.datas = [data1, data2]
 
-    Phase3Strategy.__init__(strategy)
+    Phase5Strategy.__init__(strategy)
 
     assert exit_indicator.reset_calls == 1
     assert exit_indicator.setup_calls == [(strategy, data1, False), (strategy, data2, False)]
 
 
-# Phase3Strategy._exit_signal_triggered
+# Phase5Strategy._exit_signal_triggered
 
-def _phase3_with_exit_indicator(crossed=True, direction=Signal.SHORT):
-    strategy = _new_strategy(Phase3Strategy)
+def _phase5_with_exit_indicator(crossed=True, direction=Signal.SHORT):
+    strategy = _new_strategy(Phase5Strategy)
     exit_indicator = _FakeIndicator()
     data = _data()
     exit_indicator.set_for(data, crossed=crossed, direction=direction)
@@ -796,13 +825,13 @@ def _phase3_with_exit_indicator(crossed=True, direction=Signal.SHORT):
 
 
 def test_exit_signal_triggered_false_when_not_crossed():
-    strategy, data = _phase3_with_exit_indicator(crossed=False, direction=Signal.SHORT)
+    strategy, data = _phase5_with_exit_indicator(crossed=False, direction=Signal.SHORT)
 
     assert strategy._exit_signal_triggered(SimpleNamespace(size=5), data) is False
 
 
 def test_exit_signal_triggered_true_for_long_position_when_indicator_flips_short():
-    strategy, data = _phase3_with_exit_indicator(crossed=True, direction=Signal.SHORT)
+    strategy, data = _phase5_with_exit_indicator(crossed=True, direction=Signal.SHORT)
 
     assert strategy._exit_signal_triggered(SimpleNamespace(size=5), data) is True
 
@@ -810,27 +839,27 @@ def test_exit_signal_triggered_true_for_long_position_when_indicator_flips_short
 def test_exit_signal_triggered_false_for_long_position_when_indicator_flips_long():
     """Crossed but agreeing with the open position isn't an exit trigger --
     only a cross against the position's direction counts."""
-    strategy, data = _phase3_with_exit_indicator(crossed=True, direction=Signal.LONG)
+    strategy, data = _phase5_with_exit_indicator(crossed=True, direction=Signal.LONG)
 
     assert strategy._exit_signal_triggered(SimpleNamespace(size=5), data) is False
 
 
 def test_exit_signal_triggered_true_for_short_position_when_indicator_flips_long():
-    strategy, data = _phase3_with_exit_indicator(crossed=True, direction=Signal.LONG)
+    strategy, data = _phase5_with_exit_indicator(crossed=True, direction=Signal.LONG)
 
     assert strategy._exit_signal_triggered(SimpleNamespace(size=-5), data) is True
 
 
 def test_exit_signal_triggered_false_for_short_position_when_indicator_flips_short():
-    strategy, data = _phase3_with_exit_indicator(crossed=True, direction=Signal.SHORT)
+    strategy, data = _phase5_with_exit_indicator(crossed=True, direction=Signal.SHORT)
 
     assert strategy._exit_signal_triggered(SimpleNamespace(size=-5), data) is False
 
 
-# Phase3Strategy._process_data
+# Phase5Strategy._process_data
 
-def _phase3_ready_strategy(position_size=5, exit_crossed=True, exit_direction=Signal.SHORT):
-    strategy = _new_strategy(Phase3Strategy)
+def _phase5_ready_strategy(position_size=5, exit_crossed=True, exit_direction=Signal.SHORT):
+    strategy = _new_strategy(Phase5Strategy)
     data = _data()
     exit_indicator = _FakeIndicator()
     exit_indicator.set_for(data, crossed=exit_crossed, direction=exit_direction)
@@ -845,7 +874,7 @@ def _phase3_ready_strategy(position_size=5, exit_crossed=True, exit_direction=Si
 
 
 def test_process_data_open_position_exit_signal_closes_and_tags_reason():
-    strategy, data, recorded = _phase3_ready_strategy(position_size=5, exit_crossed=True, exit_direction=Signal.SHORT)
+    strategy, data, recorded = _phase5_ready_strategy(position_size=5, exit_crossed=True, exit_direction=Signal.SHORT)
 
     strategy._process_data(data)
 
@@ -854,7 +883,7 @@ def test_process_data_open_position_exit_signal_closes_and_tags_reason():
 
 
 def test_process_data_open_position_no_exit_signal_delegates_to_super(monkeypatch):
-    strategy, data, recorded = _phase3_ready_strategy(position_size=5, exit_crossed=False)
+    strategy, data, recorded = _phase5_ready_strategy(position_size=5, exit_crossed=False)
     called = []
     monkeypatch.setattr(Phase2Strategy, "_process_data", lambda self, d: called.append(d))
 
@@ -865,7 +894,7 @@ def test_process_data_open_position_no_exit_signal_delegates_to_super(monkeypatc
 
 
 def test_process_data_flat_position_skips_exit_check_and_delegates(monkeypatch):
-    strategy, data, recorded = _phase3_ready_strategy(position_size=0, exit_crossed=True, exit_direction=Signal.SHORT)
+    strategy, data, recorded = _phase5_ready_strategy(position_size=0, exit_crossed=True, exit_direction=Signal.SHORT)
     called = []
     monkeypatch.setattr(Phase2Strategy, "_process_data", lambda self, d: called.append(d))
 
@@ -875,10 +904,10 @@ def test_process_data_flat_position_skips_exit_check_and_delegates(monkeypatch):
     assert called == [data]
 
 
-# Phase3Strategy.close
+# Phase5Strategy.close
 
 def test_close_tags_pending_reason_and_clears_it(monkeypatch):
-    strategy = _new_strategy(Phase3Strategy)
+    strategy = _new_strategy(Phase5Strategy)
     data = _data()
     strategy._exit_reasons = {}
     strategy._pending_close_reason = {data._name: ExitReason.EXIT_INDICATOR}
@@ -893,7 +922,7 @@ def test_close_tags_pending_reason_and_clears_it(monkeypatch):
 
 
 def test_close_without_pending_reason_tags_disagreement(monkeypatch):
-    strategy = _new_strategy(Phase3Strategy)
+    strategy = _new_strategy(Phase5Strategy)
     data = _data()
     strategy._exit_reasons = {}
     strategy._pending_close_reason = {}
@@ -905,7 +934,7 @@ def test_close_without_pending_reason_tags_disagreement(monkeypatch):
 
 
 def test_close_with_no_data_still_delegates(monkeypatch):
-    strategy = _new_strategy(Phase3Strategy)
+    strategy = _new_strategy(Phase5Strategy)
     strategy._exit_reasons = {}
     strategy._pending_close_reason = {}
     calls = []
@@ -917,26 +946,26 @@ def test_close_with_no_data_still_delegates(monkeypatch):
     assert calls == [None]
 
 
-# Phase3Strategy.exit_reason_for
+# Phase5Strategy.exit_reason_for
 
 def test_exit_reason_for_returns_tagged_reason():
-    strategy = _new_strategy(Phase3Strategy)
+    strategy = _new_strategy(Phase5Strategy)
     strategy._exit_reasons = {"EURUSD": ExitReason.STOP_LOSS}
 
     assert strategy.exit_reason_for("EURUSD") == ExitReason.STOP_LOSS
 
 
 def test_exit_reason_for_returns_none_when_untagged():
-    strategy = _new_strategy(Phase3Strategy)
+    strategy = _new_strategy(Phase5Strategy)
     strategy._exit_reasons = {}
 
     assert strategy.exit_reason_for("EURUSD") is None
 
 
-# Phase3Strategy._move_trade2_to_breakeven
+# Phase5Strategy._move_trade2_to_breakeven
 
 def test_move_trade2_to_breakeven_flags_when_sl_order_actually_changes(monkeypatch):
-    strategy = _new_strategy(Phase3Strategy)
+    strategy = _new_strategy(Phase5Strategy)
     data = _data()
     old_sl = _order(ref=1)
     new_sl = _order(ref=2)
@@ -956,7 +985,7 @@ def test_move_trade2_to_breakeven_flags_when_sl_order_actually_changes(monkeypat
 
 
 def test_move_trade2_to_breakeven_does_not_flag_when_sl_order_unchanged(monkeypatch):
-    strategy = _new_strategy(Phase3Strategy)
+    strategy = _new_strategy(Phase5Strategy)
     data = _data()
     state = _TwoTradeDataState(atr=[1.0])
     state.t2_sl_order = None
@@ -970,10 +999,10 @@ def test_move_trade2_to_breakeven_does_not_flag_when_sl_order_unchanged(monkeypa
     assert strategy._t2_breakeven_moved == {}
 
 
-# Phase3Strategy.notify_order
+# Phase5Strategy.notify_order
 
-def _phase3_with_state(data):
-    strategy = _new_strategy(Phase3Strategy)
+def _phase5_with_state(data):
+    strategy = _new_strategy(Phase5Strategy)
     state = _TwoTradeDataState(atr=[1.0])
     strategy._state = {id(data): state}
     strategy._exit_reasons = {}
@@ -983,7 +1012,7 @@ def _phase3_with_state(data):
 
 def test_notify_order_t1_sl_fill_tags_stop_loss(monkeypatch):
     data = _data()
-    strategy, state = _phase3_with_state(data)
+    strategy, state = _phase5_with_state(data)
     t1_sl = _order(ref=4)
     t1_sl.data = data
     state.t1_sl_order = t1_sl
@@ -996,7 +1025,7 @@ def test_notify_order_t1_sl_fill_tags_stop_loss(monkeypatch):
 
 def test_notify_order_t1_tp_fill_tags_take_profit(monkeypatch):
     data = _data()
-    strategy, state = _phase3_with_state(data)
+    strategy, state = _phase5_with_state(data)
     t1_tp = _order(ref=3)
     t1_tp.data = data
     state.t1_tp_order = t1_tp
@@ -1009,7 +1038,7 @@ def test_notify_order_t1_tp_fill_tags_take_profit(monkeypatch):
 
 def test_notify_order_t2_sl_fill_tags_stop_loss_when_never_moved_to_breakeven(monkeypatch):
     data = _data()
-    strategy, state = _phase3_with_state(data)
+    strategy, state = _phase5_with_state(data)
     t2_sl = _order(ref=7)
     t2_sl.data = data
     state.t2_sl_order = t2_sl
@@ -1022,7 +1051,7 @@ def test_notify_order_t2_sl_fill_tags_stop_loss_when_never_moved_to_breakeven(mo
 
 def test_notify_order_t2_sl_fill_tags_breakeven_when_previously_moved(monkeypatch):
     data = _data()
-    strategy, state = _phase3_with_state(data)
+    strategy, state = _phase5_with_state(data)
     t2_sl = _order(ref=7)
     t2_sl.data = data
     state.t2_sl_order = t2_sl
@@ -1037,7 +1066,7 @@ def test_notify_order_t2_sl_fill_tags_breakeven_when_previously_moved(monkeypatc
 
 def test_notify_order_unrecognized_completed_order_tags_nothing(monkeypatch):
     data = _data()
-    strategy, state = _phase3_with_state(data)
+    strategy, state = _phase5_with_state(data)
     stray = _order(ref=99)
     stray.data = data
     monkeypatch.setattr(Phase2Strategy, "notify_order", lambda self, order: None)
@@ -1049,7 +1078,7 @@ def test_notify_order_unrecognized_completed_order_tags_nothing(monkeypatch):
 
 def test_notify_order_non_completed_order_tags_nothing(monkeypatch):
     data = _data()
-    strategy, state = _phase3_with_state(data)
+    strategy, state = _phase5_with_state(data)
     t1_sl = _order(ref=4, status=bt.Order.Submitted)
     t1_sl.data = data
     state.t1_sl_order = t1_sl
@@ -1062,7 +1091,7 @@ def test_notify_order_non_completed_order_tags_nothing(monkeypatch):
 
 def test_notify_order_always_delegates_to_super(monkeypatch):
     data = _data()
-    strategy, state = _phase3_with_state(data)
+    strategy, state = _phase5_with_state(data)
     stray = _order(ref=99)
     stray.data = data
     calls = []

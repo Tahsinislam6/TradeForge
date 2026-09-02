@@ -2,7 +2,7 @@
 Baseline quality analysis using NNFX metrics.
 
 Evaluates how well a baseline/price overlay indicator performs:
-- Whipsaw Frequency: % of entries that reverse within 3 bars
+- Whipsaw Frequency: % of entries that reverse within 1 bar
 - Average Bars Held: average bars price stays on one side before crossing
 - Distance/ATR Ratio: consistency of indicator spacing from price (mean
   and spread — a wide spread means the indicator is sometimes glued to
@@ -24,6 +24,14 @@ from tradeforge.data.loader import load_indicator, merge_dataframes
 from tradeforge.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# A reference swing narrower than this many ATRs is treated as degenerate
+# (e.g. a double-top/bottom pivot bracket) and excluded from capture
+# efficiency rather than divided into -- see the module-level notes on
+# _capture_efficiency_for_run. 1.0 is a starting point, not yet empirically
+# calibrated the way ZIGZAG_ATR_MULTIPLIER is; re-derive from the
+# reference_move/mean_atr distribution before trusting pass/fail calls on it.
+MIN_REFERENCE_ATR_MULTIPLIER = 1.0
 
 @dataclass
 class BaselineMetrics:
@@ -127,11 +135,17 @@ def _capture_efficiency_for_run(
     price_end: float,
     pivot_positions: np.ndarray,
     pivot_prices: np.ndarray,
+    min_reference_move: float = 0.0,
 ) -> float:
     """Captured move (in the run's direction) vs. the reference swing spanned
     by the nearest ZigZag pivots bracketing the run.
 
-    Returns NaN when there are no pivots, or no pivot pair brackets the run.
+    Returns NaN when there are no pivots, no pivot pair brackets the run, or
+    the reference swing is smaller than `min_reference_move` (too small to be
+    a meaningful denominator -- e.g. a double-top/bottom pivot bracket that
+    round-trips back to almost its starting price despite real movement
+    happening between them; dividing by a near-zero reference swing produces
+    a blown-up ratio that isn't diluted by any realistic sample size).
     """
     if len(pivot_positions) == 0:
         return np.nan
@@ -144,14 +158,14 @@ def _capture_efficiency_for_run(
         return np.nan
 
     reference_move = abs(pivot_prices[after_idx] - pivot_prices[before_idx])
-    if not pd.notna(reference_move) or reference_move <= 0:
+    if not pd.notna(reference_move) or reference_move <= 0 or reference_move < min_reference_move:
         return np.nan
 
     captured_move = (price_end - price_start) if direction == 1 else (price_start - price_end)
     return captured_move / reference_move
 
 
-def _segment_runs(working_df: pd.DataFrame, has_zigzag: bool) -> pd.DataFrame:
+def _segment_runs(working_df: pd.DataFrame, has_zigzag: bool, has_atr: bool) -> pd.DataFrame:
     """Split `working_df` into consecutive same-side (price vs. baseline) runs.
 
     Boundary runs (the first and last) are dropped since they're incomplete —
@@ -178,6 +192,9 @@ def _segment_runs(working_df: pd.DataFrame, has_zigzag: bool) -> pd.DataFrame:
     run_metrics = []
     for run_id in valid_runs:
         group = working_df[run_ids == run_id]
+        min_reference_move = (
+            group["atr"].mean() * MIN_REFERENCE_ATR_MULTIPLIER if has_atr else 0.0
+        )
         run_metrics.append({
             "bars_held": len(group),
             "capture_efficiency": _capture_efficiency_for_run(
@@ -188,6 +205,7 @@ def _segment_runs(working_df: pd.DataFrame, has_zigzag: bool) -> pd.DataFrame:
                 price_end=group["Close"].iloc[-1],
                 pivot_positions=pivot_positions,
                 pivot_prices=pivot_prices,
+                min_reference_move=min_reference_move,
             ),
         })
 
@@ -195,8 +213,29 @@ def _segment_runs(working_df: pd.DataFrame, has_zigzag: bool) -> pd.DataFrame:
 
 
 def _whipsaw_and_avg_bars(run_df: pd.DataFrame) -> tuple[float, float]:
-    """Whipsaw frequency (% of runs lasting <= 5 bars, per NNFX) and mean bars held."""
-    whipsaws = run_df[run_df["bars_held"] <= 5]
+    """Whipsaw frequency (% of runs lasting <= 1 bar) and mean bars held.
+
+    window=1: empirically calibrated (see scripts/whipsaw_window_analysis.py)
+    across ~236K pooled runs (10 IN_SAMPLE + 3 OUT_OF_SAMPLE currencies x 12
+    Phase 1 candidate families x 6 parameterizations each). The bars_held
+    histogram, the ZigZag pivot-touch rate, and capture_efficiency by
+    bars_held bucket all decay/rise smoothly with no natural elbow -- except
+    a single mechanically-forced discontinuity: a 1-bar run's start and end
+    price are the same bar, so its captured move is always exactly 0 (0%
+    positive across ~87K such runs), while 2-bar-and-longer runs already
+    show ~70-80% positive capture regardless of length. That's the only
+    bar-count boundary with real empirical grounding -- runs of 2+ bars
+    aren't distinguishably "noise" from longer ones. Confirmed to hold
+    (near-identical percentages) on the OUT_OF_SAMPLE currencies used for
+    confirmation.
+
+    NOTE: Config.BASELINE_MAX_WHIPSAW_FREQUENCY (55%) was calibrated against
+    the *previous* <=5 window and is now stale -- whipsaw_frequency values
+    computed under window=1 run roughly 2x lower (see analysis in the PR/
+    conversation history). It needs re-deriving from a fresh Phase 1 sweep
+    before being trusted as a constraint again.
+    """
+    whipsaws = run_df[run_df["bars_held"] <= 1]
     whipsaw_frequency = (len(whipsaws) / len(run_df)) * 100
     avg_bars_held = run_df["bars_held"].mean()
     return whipsaw_frequency, avg_bars_held
@@ -272,10 +311,12 @@ class BaselineCurrencyTest:
         self.distance_atr_std: Optional[float] = None
         self.capture_efficiency: Optional[float] = None
         self.volatility_ratio: Optional[float] = None
-        # Raw per-run bar counts (gap between one confirmed direction flip and
-        # the next), exposed for empirical calibration of the whipsaw window —
-        # see scripts/whipsaw_window_analysis.py.
+        # Raw per-run bar counts and matching per-run capture efficiency
+        # (gap between one confirmed direction flip and the next, and its
+        # captured/reference-swing ratio), exposed for empirical calibration
+        # of the whipsaw window — see scripts/whipsaw_window_analysis.py.
         self.run_bars_held: list[int] = []
+        self.run_capture_efficiency: list[float] = []
 
     def run(self) -> None:
         """Load data and calculate baseline metrics."""
@@ -303,7 +344,7 @@ class BaselineCurrencyTest:
             self.volatility_ratio = None
             return
 
-        run_df = _segment_runs(working_df, has_zigzag)
+        run_df = _segment_runs(working_df, has_zigzag, has_atr)
         if len(run_df) == 0:
             logger.warning(f"No valid runs found ({self.indicator_path}); treating as full whipsaw.")
             self.whipsaw_frequency = 100.0
@@ -311,6 +352,7 @@ class BaselineCurrencyTest:
             return
 
         self.run_bars_held = run_df["bars_held"].tolist()
+        self.run_capture_efficiency = run_df["capture_efficiency"].tolist()
         self.whipsaw_frequency, self.avg_bars_held = _whipsaw_and_avg_bars(run_df)
 
         # Capture efficiency (mean of captured/reference swing ratios, ZigZag-based)

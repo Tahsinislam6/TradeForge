@@ -27,7 +27,7 @@ def _closed_trade(data_name="EURUSD", baropen=1, barclose=3, pnlcomm=10.0):
 
 
 def _strategy_with_reason(reason):
-    """A strategy double exposing exit_reason_for, like Phase3Strategy."""
+    """A strategy double exposing exit_reason_for, like Phase5Strategy."""
     return SimpleNamespace(exit_reason_for=lambda name: reason)
 
 

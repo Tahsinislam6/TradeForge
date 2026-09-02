@@ -1,9 +1,11 @@
+import numpy as np
 import pandas as pd
 import pytest
 
 from tradeforge.config import Config
 from tradeforge.data.loader import (
     _load_cached_currency_data,
+    _nan_leading_warmup,
     _require_columns,
     load_indicator,
     load_ohlc,
@@ -43,6 +45,109 @@ def _write_currency_csvs(common_dir, currency: str, close: list, atr: list) -> N
     _write_atr_csv(common_dir, currency, atr)
 
 
+# _nan_leading_warmup
+
+def test_nan_leading_warmup_replaces_contiguous_leading_run():
+    df = pd.DataFrame({
+        "DateTime": ["2024.01.01 00:00", "2024.01.02 00:00", "2024.01.03 00:00", "2024.01.04 00:00"],
+        "Buffer_Value_0": [0.0, 0.0, 1.1, 1.2],
+    })
+
+    result = _nan_leading_warmup(df, ["Buffer_Value_0"])
+
+    assert result["Buffer_Value_0"].iloc[:2].isna().all()
+    assert result["Buffer_Value_0"].iloc[2:].tolist() == [1.1, 1.2]
+
+
+def test_nan_leading_warmup_works_for_any_sentinel_value():
+    """No sentinel is hardcoded -- whatever the first bar reads (MT4's
+    EMPTY_VALUE, 0.0, or anything else a given indicator uses) is taken as
+    the placeholder to match."""
+    df = pd.DataFrame({
+        "DateTime": ["2024.01.01 00:00", "2024.01.02 00:00", "2024.01.03 00:00"],
+        "Buffer_Value_0": [2147483647.0, 1.05, 1.06],
+    })
+
+    result = _nan_leading_warmup(df, ["Buffer_Value_0"])
+
+    assert result["Buffer_Value_0"].iloc[0] != result["Buffer_Value_0"].iloc[0]
+    assert result["Buffer_Value_0"].iloc[1:].tolist() == [1.05, 1.06]
+
+
+def test_nan_leading_warmup_leaves_scattered_recurrence_alone():
+    """A value equal to the leading sentinel that shows up again later,
+    not as part of one unbroken run from the start, is real data (e.g. a
+    genuine oscillator reading of exactly 0) and is left untouched."""
+    df = pd.DataFrame({
+        "DateTime": [f"2024.01.{i+1:02d} 00:00" for i in range(5)],
+        "Buffer_Value_0": [0.0, 1.0, 0.0, 1.0, 1.0],
+    })
+
+    result = _nan_leading_warmup(df, ["Buffer_Value_0"])
+
+    assert result["Buffer_Value_0"].iloc[0] != result["Buffer_Value_0"].iloc[0]
+    assert result["Buffer_Value_0"].iloc[1:].tolist() == [1.0, 0.0, 1.0, 1.0]
+
+
+def test_nan_leading_warmup_leaves_entirely_constant_column_alone():
+    """A column that's the same value for its whole span has no later bar
+    proving that value was ever a placeholder, so it's left as-is rather
+    than wiping out an indicator that's genuinely flat."""
+    df = pd.DataFrame({
+        "DateTime": [f"2024.01.{i+1:02d} 00:00" for i in range(4)],
+        "Buffer_Value_0": [1.5, 1.5, 1.5, 1.5],
+    })
+
+    result = _nan_leading_warmup(df, ["Buffer_Value_0"])
+
+    assert result["Buffer_Value_0"].tolist() == [1.5, 1.5, 1.5, 1.5]
+
+
+def test_nan_leading_warmup_columns_evaluated_independently():
+    df = pd.DataFrame({
+        "DateTime": [f"2024.01.{i+1:02d} 00:00" for i in range(4)],
+        "Buffer_Value_0": [0.0, 0.0, 0.0, 1.0],
+        "Buffer_Value_1": [5.0, 5.0, 6.0, 7.0],
+    })
+
+    result = _nan_leading_warmup(df, ["Buffer_Value_0", "Buffer_Value_1"])
+
+    assert result["Buffer_Value_0"].iloc[:3].isna().all()
+    assert result["Buffer_Value_0"].iloc[3] == 1.0
+    assert result["Buffer_Value_1"].iloc[:2].isna().all()
+    assert result["Buffer_Value_1"].iloc[2:].tolist() == [6.0, 7.0]
+
+
+def test_nan_leading_warmup_falls_back_to_row_order_when_datetime_unparseable():
+    """Not every caller's DateTime is real MT4-format text (e.g. tests use
+    plain sequential ints) -- rather than raise, fall back to trusting the
+    given row order as already chronological."""
+    df = pd.DataFrame({
+        "DateTime": [0, 1, 2],
+        "Buffer_Value_0": [0.0, 1.1, 1.2],
+    })
+
+    result = _nan_leading_warmup(df, ["Buffer_Value_0"])
+
+    assert result["Buffer_Value_0"].iloc[0] != result["Buffer_Value_0"].iloc[0]
+    assert result["Buffer_Value_0"].iloc[1:].tolist() == [1.1, 1.2]
+
+
+def test_nan_leading_warmup_respects_true_chronological_order_not_file_order():
+    """MT4 exports are written newest-first -- this must resolve the
+    warmup end by actual date, not by raw file row position."""
+    df = pd.DataFrame({
+        "DateTime": ["2024.01.03 00:00", "2024.01.02 00:00", "2024.01.01 00:00"],
+        "Buffer_Value_0": [1.2, 1.1, 0.0],
+    })
+
+    result = _nan_leading_warmup(df, ["Buffer_Value_0"])
+
+    assert result.loc[result["DateTime"] == "2024.01.01 00:00", "Buffer_Value_0"].isna().all()
+    assert result.loc[result["DateTime"] == "2024.01.02 00:00", "Buffer_Value_0"].iloc[0] == 1.1
+    assert result.loc[result["DateTime"] == "2024.01.03 00:00", "Buffer_Value_0"].iloc[0] == 1.2
+
+
 def test_load_indicator_single_buffer_renamed_with_indicator_name(tmp_path):
     file_path = _write_csv(tmp_path, {
         "DateTime": ["2024.01.01 00:00", "2024.01.02 00:00"],
@@ -52,7 +157,10 @@ def test_load_indicator_single_buffer_renamed_with_indicator_name(tmp_path):
     df = load_indicator(file_path, num_buffers=1, indicator_name="ATR")
 
     assert list(df.columns) == ["DateTime", "ATR_Buffer_0"]
-    assert df["ATR_Buffer_0"].tolist() == [1.1, 1.2]
+    # The earliest (oldest) bar's own value is the leading-warmup sentinel
+    # (see _nan_leading_warmup) and gets replaced with NaN.
+    assert df["ATR_Buffer_0"].iloc[0] != df["ATR_Buffer_0"].iloc[0]
+    assert df["ATR_Buffer_0"].iloc[1] == 1.2
 
 
 def test_load_indicator_multiple_buffers_all_renamed(tmp_path):
@@ -359,7 +467,10 @@ def test_load_cached_currency_data_loads_and_merges_single_currency(tmp_path):
     assert list(cached_data.keys()) == ["EURUSD_SB"]
     df = cached_data["EURUSD_SB"]
     assert df["Close"].tolist() == [1.1, 1.2]
-    assert df["ATR_Buffer_0"].tolist() == [0.01, 0.02]
+    # ATR's oldest (leading) reading is the warmup sentinel and becomes NaN
+    # -- see _nan_leading_warmup.
+    assert df["ATR_Buffer_0"].iloc[0] != df["ATR_Buffer_0"].iloc[0]
+    assert df["ATR_Buffer_0"].iloc[1] == 0.02
 
 
 def test_load_cached_currency_data_keeps_currencies_isolated(tmp_path):
@@ -421,7 +532,10 @@ def test_load_static_data_requests_and_loads_successfully(tmp_path, monkeypatch,
         cached_data = load_static_data(["EURUSD_SB"])
 
     assert cached_data["EURUSD_SB"]["Close"].tolist() == [1.1, 1.2]
-    assert cached_data["EURUSD_SB"]["ATR_Buffer_0"].tolist() == [0.01, 0.02]
+    # ATR's oldest (leading) reading is the warmup sentinel and becomes NaN
+    # -- see _nan_leading_warmup.
+    assert cached_data["EURUSD_SB"]["ATR_Buffer_0"].iloc[0] != cached_data["EURUSD_SB"]["ATR_Buffer_0"].iloc[0]
+    assert cached_data["EURUSD_SB"]["ATR_Buffer_0"].iloc[1] == 0.02
     assert "Requesting OHLC/ATR data for 1 currencies" in caplog.text
     assert "Loaded and merged static data for 1 currencies" in caplog.text
 

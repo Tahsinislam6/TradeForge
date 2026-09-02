@@ -19,6 +19,7 @@ def _indicator(name="Baseline", col_names=("Baseline_Buffer_0",), num_buffers=1)
     return SimpleNamespace(
         name=name, parameters=[10], buffer_values=list(range(num_buffers)),
         num_buffers=num_buffers, label=name, col_names=list(col_names),
+        max_warmup_bars=None,
     )
 
 
@@ -125,9 +126,9 @@ def test_load_currency_data_with_c1_requests_both_indicators_and_extends_kwargs(
 
 
 def test_load_currency_data_skips_request_when_c1_already_cached(monkeypatch):
-    """Phase 3 sweeps hold both baseline and C1 fixed (merged into
-    cached_data by load_phase3_cache) -- c1 must be skippable the same way
-    baseline already is, or every Phase 3 trial would needlessly re-request
+    """Phase 5 sweeps hold both baseline and C1 fixed (merged into
+    cached_data by load_phase5_cache) -- c1 must be skippable the same way
+    baseline already is, or every Phase 5 trial would needlessly re-request
     a C1 that never changes across the sweep."""
     baseline = _indicator(name="Baseline", col_names=["Baseline_Buffer_0"])
     c1 = _indicator(name="C1", col_names=["C1_Buffer_0"])

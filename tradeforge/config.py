@@ -31,9 +31,9 @@ class Config:
     "EURNZD_SB",   # high vol cross
     "GBPCHF_SB",   # high vol, haven-linked
     "EURCHF_SB",   # ultra-low vol — hardest whipsaw case in your universe
-    "AUDSGD_SB",   # thin managed cross
+    "AUDJPY_SB",   # risk-sentiment barometer
     ]
-    ALL_CURRENCIES = ["AUDCAD_SB", "AUDCHF_SB", "AUDJPY_SB", "AUDNZD_SB", "AUDSGD_SB", "AUDUSD_SB", 
+    ALL_CURRENCIES = ["AUDCAD_SB", "AUDCHF_SB", "AUDJPY_SB", "AUDNZD_SB", "AUDUSD_SB", # "AUDSGD_SB"Not working 
                       "CADCHF_SB", "CADJPY_SB",
                       "CHFJPY_SB", "CHFSGD_SB",
                       "EURAUD_SB", "EURCAD_SB", "EURCHF_SB", "EURGBP_SB", "EURJPY_SB", "EURNZD_SB", "EURSGD_SB", "EURUSD_SB",
@@ -43,8 +43,17 @@ class Config:
                       "USDCAD_SB", "USDCHF_SB", "USDJPY_SB", "USDSGD_SB"]
 
     # Baseline quality constraints
-    BASELINE_MAX_WHIPSAW_FREQUENCY = 40.0  # % of runs
-    BASELINE_MIN_AVG_BARS_HELD = 8.5
+    # Recalibrated from 40% -> 55% against the <=5-bar whipsaw window that
+    # was in place at the time: at 40%, only 2/20 swept Phase 1 baseline
+    # families had any trial pass; at 55%, 12/20 did.
+    #
+    # STALE: baseline.py's whipsaw window has since been re-derived to <=1
+    # bar (see scripts/whipsaw_window_analysis.py and
+    # tradeforge.backtest.baseline._whipsaw_and_avg_bars), under which
+    # whipsaw_frequency runs roughly 2x lower than under the old <=5 window
+    # this 55% was calibrated against. Needs re-deriving from a fresh Phase 1
+    # sweep before being trusted as a constraint again.
+    BASELINE_MAX_WHIPSAW_FREQUENCY = 55.0  # % of runs -- STALE, see above
     BASELINE_MIN_ATR_RATIO = 1.3
     BASELINE_MAX_ATR_RATIO = 2.0
     # Caps a lagged/smoothed baseline's own bar-to-bar movement (relative to
@@ -61,6 +70,6 @@ class Config:
 
     # ATR-based ZigZag
     # k=3.0: pivot-count elbow on 7.9y D1 history, independently confirmed on
-    # EURUSD/CHFJPY/AUDNZD. Median reference-swing duration 18-21 bars (vs. the
-    # 8.5-bar BASELINE_MIN_AVG_BARS_HELD floor) and 110-320x a typical spread.
+    # EURUSD/CHFJPY/AUDNZD. Median reference-swing duration 18-21 bars and
+    # 110-320x a typical spread.
     ZIGZAG_ATR_MULTIPLIER = 3.0

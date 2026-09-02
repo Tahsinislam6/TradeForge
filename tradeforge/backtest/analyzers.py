@@ -9,7 +9,7 @@ class PairedTradeAnalyzer(bt.Analyzer):
 
     Also tags each pair with why it closed, read from the owning strategy's
     exit_reason_for(data_name) at the moment each leg's trade closes (see
-    Phase3Strategy). Strategies that don't expose exit_reason_for -- Phase1/
+    Phase5Strategy). Strategies that don't expose exit_reason_for -- Phase1/
     Phase2, which have no independent exit indicator -- degrade to an
     untagged (None) reason instead of raising."""
 

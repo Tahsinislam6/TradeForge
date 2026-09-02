@@ -82,16 +82,6 @@ def test_main_parses_int_and_float_parameters(monkeypatch):
     assert isinstance(params[1], float)
 
 
-def test_main_defaults_currencies_to_config_in_sample(monkeypatch):
-    monkeypatch.setattr(Config, "IN_SAMPLE", ["EURUSD_SB", "GBPUSD_SB"])
-    calls = _patch_pipeline(monkeypatch)
-    _set_argv(monkeypatch, "SMA", "20")
-
-    main()
-
-    assert calls["load_static_data"] == ["EURUSD_SB", "GBPUSD_SB"]
-
-
 def test_main_currencies_flag_overrides_default(monkeypatch):
     calls = _patch_pipeline(monkeypatch)
     _set_argv(monkeypatch, "SMA", "20", "--currencies", "AUDNZD_SB", "NZDCAD_SB")

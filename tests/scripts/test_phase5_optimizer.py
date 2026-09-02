@@ -5,7 +5,7 @@ import optuna
 import pytest
 from optuna.trial import TrialState, create_trial
 
-from scripts.phase3_optimizer import (
+from scripts.phase5_optimizer import (
     FAILED_TRIAL_VALUE,
     _build_sampler,
     _journal_storage,
@@ -15,25 +15,25 @@ from scripts.phase3_optimizer import (
     export_best_trials,
     export_best_trials_from_db,
     get_constraint_violations,
-    load_phase3_cache,
+    load_phase5_cache,
     objective,
     run_all,
     run_optimization,
 )
-from tradeforge.backtest.candidates.exit_candidates import ExitCandidate
+from tradeforge.backtest.candidates.candidate_types import ExitCandidate
 from tradeforge.backtest.candidates.param_space import IntParam
 from tradeforge.backtest.config import LineCrossIndicator, PriceCrossIndicator
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 
-# load_phase3_cache
+# load_phase5_cache
 
-def test_load_phase3_cache_merges_static_baseline_and_c1_data(monkeypatch):
+def test_load_phase5_cache_merges_static_baseline_and_c1_data(monkeypatch):
     import pandas as pd
 
     monkeypatch.setattr(
-        "scripts.phase3_optimizer.load_static_data",
+        "scripts.phase5_optimizer.load_static_data",
         lambda currencies: {"EURUSD_SB": pd.DataFrame({"DateTime": ["1"], "Close": [1.0]})},
     )
 
@@ -42,24 +42,24 @@ def test_load_phase3_cache_merges_static_baseline_and_c1_data(monkeypatch):
             return {"EURUSD_SB": pd.DataFrame({"DateTime": ["1"], "Baseline_Buffer_0": [2.0]})}
         return {"EURUSD_SB": pd.DataFrame({"DateTime": ["1"], "C1_Buffer_0": [3.0]})}
 
-    monkeypatch.setattr("scripts.phase3_optimizer.request_and_load_many", fake_request)
+    monkeypatch.setattr("scripts.phase5_optimizer.request_and_load_many", fake_request)
     baseline = SimpleNamespace(name="Baseline")
     c1 = SimpleNamespace(name="C1")
 
-    result = load_phase3_cache(["EURUSD_SB"], baseline, c1)
+    result = load_phase5_cache(["EURUSD_SB"], baseline, c1)
 
     assert result["EURUSD_SB"]["Baseline_Buffer_0"].tolist() == [2.0]
     assert result["EURUSD_SB"]["C1_Buffer_0"].tolist() == [3.0]
 
 
-def test_load_phase3_cache_wraps_failures_in_runtime_error(monkeypatch):
+def test_load_phase5_cache_wraps_failures_in_runtime_error(monkeypatch):
     monkeypatch.setattr(
-        "scripts.phase3_optimizer.load_static_data",
+        "scripts.phase5_optimizer.load_static_data",
         lambda currencies: (_ for _ in ()).throw(RuntimeError("mt4 down")),
     )
 
     with pytest.raises(RuntimeError, match="Failed to load data before optimisation"):
-        load_phase3_cache(["EURUSD_SB"], SimpleNamespace(name="Baseline"), SimpleNamespace(name="C1"))
+        load_phase5_cache(["EURUSD_SB"], SimpleNamespace(name="Baseline"), SimpleNamespace(name="C1"))
 
 
 # compute_reference
@@ -74,7 +74,7 @@ def test_compute_reference_extracts_the_four_reference_numbers(monkeypatch):
             "total_trades": 300,  # extra fields present in a real summary must be ignored
         }
 
-    monkeypatch.setattr("scripts.phase3_optimizer.run_backtest", fake_run_backtest)
+    monkeypatch.setattr("scripts.phase5_optimizer.run_backtest", fake_run_backtest)
     baseline = SimpleNamespace(name="Baseline")
     c1 = SimpleNamespace(name="C1")
 
@@ -206,11 +206,11 @@ def test_build_sampler_grid_returns_grid_sampler():
 
 @pytest.mark.filterwarnings("ignore::optuna.exceptions.ExperimentalWarning")
 def test_build_sampler_nsga2_returns_sampler_wired_to_module_thresholds(monkeypatch):
-    monkeypatch.setattr("scripts.phase3_optimizer.MIN_AVG_LOSS_REDUCTION_PCT", 20.0)
-    monkeypatch.setattr("scripts.phase3_optimizer.MIN_WIN_RATE_LIFT", 5.0)
-    monkeypatch.setattr("scripts.phase3_optimizer.MIN_PROFIT_FACTOR", 1.2)
-    monkeypatch.setattr("scripts.phase3_optimizer.MAX_PCT_WINNERS_CLOSED_EARLY", 30.0)
-    monkeypatch.setattr("scripts.phase3_optimizer.MIN_TRADES", 200)
+    monkeypatch.setattr("scripts.phase5_optimizer.MIN_AVG_LOSS_REDUCTION_PCT", 20.0)
+    monkeypatch.setattr("scripts.phase5_optimizer.MIN_WIN_RATE_LIFT", 5.0)
+    monkeypatch.setattr("scripts.phase5_optimizer.MIN_PROFIT_FACTOR", 1.2)
+    monkeypatch.setattr("scripts.phase5_optimizer.MAX_PCT_WINNERS_CLOSED_EARLY", 30.0)
+    monkeypatch.setattr("scripts.phase5_optimizer.MIN_TRADES", 200)
 
     sampler = _build_sampler(_exit_candidate(sampler="nsga2"))
 
@@ -232,13 +232,13 @@ def _reference(win_rate=55.0, avg_loss=-30.0):
 
 def test_objective_happy_path_sets_user_attrs_and_returns_score(monkeypatch):
     monkeypatch.setattr(
-        "scripts.phase3_optimizer.run_backtest",
+        "scripts.phase5_optimizer.run_backtest",
         lambda **kwargs: {
             "total_trades": 250, "win_rate": 65.0, "profit_factor": 1.5,
             "avg_loss": -15.0, "pct_winners_closed_early": 10.0,
         },
     )
-    monkeypatch.setattr("scripts.phase3_optimizer.clear_external_files", lambda *a, **k: None)
+    monkeypatch.setattr("scripts.phase5_optimizer.clear_external_files", lambda *a, **k: None)
     trial = _ask()
     baseline = SimpleNamespace(name="Baseline", parameters=[1])
     c1 = SimpleNamespace(name="C1", parameters=[1])
@@ -257,13 +257,13 @@ def test_objective_happy_path_sets_user_attrs_and_returns_score(monkeypatch):
 
 def test_objective_score_caps_avg_loss_reduction_and_win_rate_lift_contributions(monkeypatch):
     monkeypatch.setattr(
-        "scripts.phase3_optimizer.run_backtest",
+        "scripts.phase5_optimizer.run_backtest",
         lambda **kwargs: {
             "total_trades": 250, "win_rate": 100.0, "profit_factor": 1.5,
             "avg_loss": 0.0, "pct_winners_closed_early": 10.0,
         },
     )
-    monkeypatch.setattr("scripts.phase3_optimizer.clear_external_files", lambda *a, **k: None)
+    monkeypatch.setattr("scripts.phase5_optimizer.clear_external_files", lambda *a, **k: None)
     baseline = SimpleNamespace(name="Baseline", parameters=[1])
     c1 = SimpleNamespace(name="C1", parameters=[1])
 
@@ -276,13 +276,13 @@ def test_objective_zero_reference_avg_loss_gives_zero_reduction(monkeypatch):
     """Guard against a reference with no losing pairs at all (avg_loss=0) --
     the reduction ratio would divide by zero otherwise."""
     monkeypatch.setattr(
-        "scripts.phase3_optimizer.run_backtest",
+        "scripts.phase5_optimizer.run_backtest",
         lambda **kwargs: {
             "total_trades": 250, "win_rate": 65.0, "profit_factor": 1.5,
             "avg_loss": -5.0, "pct_winners_closed_early": 10.0,
         },
     )
-    monkeypatch.setattr("scripts.phase3_optimizer.clear_external_files", lambda *a, **k: None)
+    monkeypatch.setattr("scripts.phase5_optimizer.clear_external_files", lambda *a, **k: None)
     baseline = SimpleNamespace(name="Baseline", parameters=[1])
     c1 = SimpleNamespace(name="C1", parameters=[1])
 
@@ -294,13 +294,13 @@ def test_objective_zero_reference_avg_loss_gives_zero_reduction(monkeypatch):
 def test_objective_passes_correct_kwargs_to_run_backtest(monkeypatch):
     captured = {}
     monkeypatch.setattr(
-        "scripts.phase3_optimizer.run_backtest",
+        "scripts.phase5_optimizer.run_backtest",
         lambda **kwargs: captured.update(kwargs) or {
             "total_trades": 250, "win_rate": 65.0, "profit_factor": 1.5,
             "avg_loss": -15.0, "pct_winners_closed_early": 10.0,
         },
     )
-    monkeypatch.setattr("scripts.phase3_optimizer.clear_external_files", lambda *a, **k: None)
+    monkeypatch.setattr("scripts.phase5_optimizer.clear_external_files", lambda *a, **k: None)
     baseline = SimpleNamespace(name="Baseline", parameters=[1])
     c1 = SimpleNamespace(name="C1", parameters=[1])
     trial = _ask()
@@ -320,13 +320,13 @@ def test_objective_passes_correct_kwargs_to_run_backtest(monkeypatch):
 def test_objective_line_cross_candidate_passes_cross_level_to_exit_indicator(monkeypatch):
     captured = {}
     monkeypatch.setattr(
-        "scripts.phase3_optimizer.run_backtest",
+        "scripts.phase5_optimizer.run_backtest",
         lambda **kwargs: captured.update(kwargs) or {
             "total_trades": 250, "win_rate": 65.0, "profit_factor": 1.5,
             "avg_loss": -15.0, "pct_winners_closed_early": 10.0,
         },
     )
-    monkeypatch.setattr("scripts.phase3_optimizer.clear_external_files", lambda *a, **k: None)
+    monkeypatch.setattr("scripts.phase5_optimizer.clear_external_files", lambda *a, **k: None)
     baseline = SimpleNamespace(name="Baseline", parameters=[1])
     c1 = SimpleNamespace(name="C1", parameters=[1])
     candidate = _exit_candidate(cls=LineCrossIndicator, cross_level=1.5)
@@ -339,10 +339,10 @@ def test_objective_line_cross_candidate_passes_cross_level_to_exit_indicator(mon
 def test_objective_prunes_and_still_clears_files_when_run_backtest_raises(monkeypatch):
     cleared = []
     monkeypatch.setattr(
-        "scripts.phase3_optimizer.run_backtest",
+        "scripts.phase5_optimizer.run_backtest",
         lambda **kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
     )
-    monkeypatch.setattr("scripts.phase3_optimizer.clear_external_files", lambda *a, **k: cleared.append((a, k)))
+    monkeypatch.setattr("scripts.phase5_optimizer.clear_external_files", lambda *a, **k: cleared.append((a, k)))
     baseline = SimpleNamespace(name="Baseline", parameters=[1])
     c1 = SimpleNamespace(name="C1", parameters=[1])
     trial = _ask()
@@ -356,13 +356,13 @@ def test_objective_prunes_and_still_clears_files_when_run_backtest_raises(monkey
 
 def test_objective_prunes_when_total_trades_at_or_below_minimum(monkeypatch):
     monkeypatch.setattr(
-        "scripts.phase3_optimizer.run_backtest",
+        "scripts.phase5_optimizer.run_backtest",
         lambda **kwargs: {
             "total_trades": 200, "win_rate": 65.0, "profit_factor": 1.5,
             "avg_loss": -15.0, "pct_winners_closed_early": 10.0,
         },
     )
-    monkeypatch.setattr("scripts.phase3_optimizer.clear_external_files", lambda *a, **k: None)
+    monkeypatch.setattr("scripts.phase5_optimizer.clear_external_files", lambda *a, **k: None)
     baseline = SimpleNamespace(name="Baseline", parameters=[1])
     c1 = SimpleNamespace(name="C1", parameters=[1])
     trial = _ask()
@@ -517,7 +517,7 @@ def test_run_worker_trials_loads_shared_study_and_runs_its_share(tmp_path, monke
     storage = str(tmp_path / "journal.log")
     study_name = "worker_test_study"
     optuna.create_study(direction="maximize", storage=_journal_storage(storage), study_name=study_name)
-    monkeypatch.setattr("scripts.phase3_optimizer.objective", lambda *a, **k: 1.0)
+    monkeypatch.setattr("scripts.phase5_optimizer.objective", lambda *a, **k: 1.0)
     baseline = SimpleNamespace(name="Baseline", parameters=[1])
     c1 = SimpleNamespace(name="C1", parameters=[1])
 
@@ -533,14 +533,14 @@ def test_run_worker_trials_loads_shared_study_and_runs_its_share(tmp_path, monke
 
 def test_run_optimization_n_jobs_1_does_not_dispatch_workers(monkeypatch):
     called = []
-    monkeypatch.setattr("scripts.phase3_optimizer._run_parallel", lambda *a, **k: called.append(1))
+    monkeypatch.setattr("scripts.phase5_optimizer._run_parallel", lambda *a, **k: called.append(1))
     real_create_study = optuna.create_study
     monkeypatch.setattr(
-        "scripts.phase3_optimizer.optuna.create_study",
+        "scripts.phase5_optimizer.optuna.create_study",
         lambda **kwargs: real_create_study(direction=kwargs["direction"], sampler=kwargs["sampler"]),
     )
     monkeypatch.setattr(
-        "scripts.phase3_optimizer.objective",
+        "scripts.phase5_optimizer.objective",
         lambda trial, currencies, baseline, c1, cached_data, reference, exit_spec, label="Exit", log_timing=False: 1.0,
     )
     baseline = SimpleNamespace(name="Baseline", parameters=[1])
@@ -555,7 +555,7 @@ def test_run_optimization_n_jobs_1_does_not_dispatch_workers(monkeypatch):
 
 def test_run_optimization_raises_without_a_trial_count_for_nsga2(monkeypatch):
     real_create_study = optuna.create_study
-    monkeypatch.setattr("scripts.phase3_optimizer.optuna.create_study", lambda **kwargs: real_create_study())
+    monkeypatch.setattr("scripts.phase5_optimizer.optuna.create_study", lambda **kwargs: real_create_study())
     baseline = SimpleNamespace(name="Baseline", parameters=[1])
     c1 = SimpleNamespace(name="C1", parameters=[1])
     candidate = _exit_candidate(name="mystery", sampler="nsga2", param_space=[IntParam(1, 5)])
@@ -565,17 +565,17 @@ def test_run_optimization_raises_without_a_trial_count_for_nsga2(monkeypatch):
 
 
 def test_run_all_collects_completed_and_failed_candidates(monkeypatch, capsys):
-    monkeypatch.setattr("scripts.phase3_optimizer.load_phase3_cache", lambda currencies, baseline, c1: {})
-    monkeypatch.setattr("scripts.phase3_optimizer.compute_reference", lambda currencies, baseline, c1, cached_data: _reference())
-    monkeypatch.setattr("scripts.phase3_optimizer.export_best_trials", lambda studies: None)
-    monkeypatch.setattr("scripts.phase3_optimizer.send_notification", lambda message: None)
+    monkeypatch.setattr("scripts.phase5_optimizer.load_phase5_cache", lambda currencies, baseline, c1: {})
+    monkeypatch.setattr("scripts.phase5_optimizer.compute_reference", lambda currencies, baseline, c1, cached_data: _reference())
+    monkeypatch.setattr("scripts.phase5_optimizer.export_best_trials", lambda studies: None)
+    monkeypatch.setattr("scripts.phase5_optimizer.send_notification", lambda message: None)
 
     def fake_run_optimization(currencies, baseline, c1, exit_spec, n_trials=None, cached_data=None, reference=None, log_timing=False, n_jobs=1):
         if exit_spec.name == "bad":
             raise RuntimeError("boom")
         return optuna.create_study()
 
-    monkeypatch.setattr("scripts.phase3_optimizer.run_optimization", fake_run_optimization)
+    monkeypatch.setattr("scripts.phase5_optimizer.run_optimization", fake_run_optimization)
     candidates = [_exit_candidate(sampler="grid"), _exit_candidate(sampler="grid")]
     candidates[0].name = "good"
     candidates[1].name = "bad"

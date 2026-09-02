@@ -2,20 +2,29 @@ from types import SimpleNamespace
 
 import optuna
 import pytest
+from optuna.trial import TrialState, create_trial
 
 import scripts.phase1_optimizer as phase1_optimizer
+import scripts.phase2_optimizer as phase2_optimizer
+import scripts.phase5_optimizer as phase5_optimizer
 from scripts.phase1_optimizer import (
     FAILED_TRIAL_VALUE,
+    OPTUNA_JOURNAL_PATH,
+    _journal_storage,
     _resolve_trial_count,
+    _run_parallel,
+    _run_worker_trials,
+    _split_trial_counts,
     evaluate_trial,
     get_constraint_violations,
+    get_feasible_trials,
     load_baseline_data,
     objective,
     run_all,
     run_optimization,
 )
 from tradeforge.backtest.baseline import BaselineMetrics
-from tradeforge.backtest.candidates.baseline_candidates import BaselineCandidate
+from tradeforge.backtest.candidates.candidate_types import BaselineCandidate
 from tradeforge.backtest.candidates.param_space import IntParam
 from tradeforge.config import Config
 
@@ -29,7 +38,6 @@ def _trial(**user_attrs):
 def _set_thresholds(monkeypatch):
     monkeypatch.setattr(Config, "BASELINE_MIN_ATR_RATIO", 1.3)
     monkeypatch.setattr(Config, "BASELINE_MAX_ATR_RATIO", 2.0)
-    monkeypatch.setattr(Config, "BASELINE_MIN_AVG_BARS_HELD", 8.5)
     monkeypatch.setattr(Config, "BASELINE_MAX_DISTANCE_ATR_STD", 1.0)
     monkeypatch.setattr(Config, "BASELINE_MAX_VOLATILITY_RATIO", 1.0)
 
@@ -38,71 +46,160 @@ def _set_thresholds(monkeypatch):
 
 def test_get_constraint_violations_missing_attr_returns_all_failed_value(monkeypatch):
     _set_thresholds(monkeypatch)
-    trial = _trial(avg_bars_held=10.0, distance_atr_ratio=1.5, distance_atr_std=0.5)
+    trial = _trial(distance_atr_ratio=1.5, distance_atr_std=0.5)
     # volatility_ratio omitted
 
     result = get_constraint_violations(trial)
 
-    assert result == (FAILED_TRIAL_VALUE,) * 4
+    assert result == (FAILED_TRIAL_VALUE,) * 3
 
 
 def test_get_constraint_violations_all_within_bounds_returns_zeros(monkeypatch):
     _set_thresholds(monkeypatch)
-    trial = _trial(avg_bars_held=10.0, distance_atr_ratio=1.5, distance_atr_std=0.5, volatility_ratio=0.5)
+    trial = _trial(distance_atr_ratio=1.5, distance_atr_std=0.5, volatility_ratio=0.5)
 
     result = get_constraint_violations(trial)
 
-    assert result == (0.0, 0.0, 0.0, 0.0)
+    assert result == (0.0, 0.0, 0.0)
 
 
 def test_get_constraint_violations_distance_atr_ratio_above_max(monkeypatch):
     _set_thresholds(monkeypatch)
-    trial = _trial(avg_bars_held=10.0, distance_atr_ratio=2.5, distance_atr_std=0.5, volatility_ratio=0.5)
+    trial = _trial(distance_atr_ratio=2.5, distance_atr_std=0.5, volatility_ratio=0.5)
 
     result = get_constraint_violations(trial)
 
     assert result[0] == pytest.approx(0.5)  # 2.5 - 2.0
-    assert result[1:] == (0.0, 0.0, 0.0)
+    assert result[1:] == (0.0, 0.0)
 
 
 def test_get_constraint_violations_distance_atr_ratio_below_min(monkeypatch):
     _set_thresholds(monkeypatch)
-    trial = _trial(avg_bars_held=10.0, distance_atr_ratio=1.0, distance_atr_std=0.5, volatility_ratio=0.5)
+    trial = _trial(distance_atr_ratio=1.0, distance_atr_std=0.5, volatility_ratio=0.5)
 
     result = get_constraint_violations(trial)
 
     assert result[0] == pytest.approx(0.3)  # 1.3 - 1.0
-    assert result[1:] == (0.0, 0.0, 0.0)
-
-
-def test_get_constraint_violations_avg_bars_held_below_min(monkeypatch):
-    _set_thresholds(monkeypatch)
-    trial = _trial(avg_bars_held=5.0, distance_atr_ratio=1.5, distance_atr_std=0.5, volatility_ratio=0.5)
-
-    result = get_constraint_violations(trial)
-
-    assert result[1] == pytest.approx(3.5)  # 8.5 - 5.0
-    assert (result[0], result[2], result[3]) == (0.0, 0.0, 0.0)
+    assert result[1:] == (0.0, 0.0)
 
 
 def test_get_constraint_violations_distance_atr_std_above_max(monkeypatch):
     _set_thresholds(monkeypatch)
-    trial = _trial(avg_bars_held=10.0, distance_atr_ratio=1.5, distance_atr_std=1.4, volatility_ratio=0.5)
+    trial = _trial(distance_atr_ratio=1.5, distance_atr_std=1.4, volatility_ratio=0.5)
 
     result = get_constraint_violations(trial)
 
-    assert result[2] == pytest.approx(0.4)  # 1.4 - 1.0
-    assert (result[0], result[1], result[3]) == (0.0, 0.0, 0.0)
+    assert result[1] == pytest.approx(0.4)  # 1.4 - 1.0
+    assert (result[0], result[2]) == (0.0, 0.0)
 
 
 def test_get_constraint_violations_volatility_ratio_above_max(monkeypatch):
     _set_thresholds(monkeypatch)
-    trial = _trial(avg_bars_held=10.0, distance_atr_ratio=1.5, distance_atr_std=0.5, volatility_ratio=1.6)
+    trial = _trial(distance_atr_ratio=1.5, distance_atr_std=0.5, volatility_ratio=1.6)
 
     result = get_constraint_violations(trial)
 
-    assert result[3] == pytest.approx(0.6)  # 1.6 - 1.0
-    assert (result[0], result[1], result[2]) == (0.0, 0.0, 0.0)
+    assert result[2] == pytest.approx(0.6)  # 1.6 - 1.0
+    assert (result[0], result[1]) == (0.0, 0.0)
+
+
+def test_get_constraint_violations_exact_bounds_are_feasible(monkeypatch):
+    # Bounds are inclusive: sitting exactly on a threshold must not register
+    # as a violation.
+    _set_thresholds(monkeypatch)
+    trial = _trial(distance_atr_ratio=2.0, distance_atr_std=1.0, volatility_ratio=1.0)
+
+    result = get_constraint_violations(trial)
+
+    assert result == (0.0, 0.0, 0.0)
+
+
+def test_get_constraint_violations_min_bound_is_feasible(monkeypatch):
+    _set_thresholds(monkeypatch)
+    trial = _trial(distance_atr_ratio=1.3, distance_atr_std=0.0, volatility_ratio=0.0)
+
+    result = get_constraint_violations(trial)
+
+    assert result == (0.0, 0.0, 0.0)
+
+
+def test_get_constraint_violations_all_three_violated_simultaneously(monkeypatch):
+    _set_thresholds(monkeypatch)
+    trial = _trial(distance_atr_ratio=3.0, distance_atr_std=2.0, volatility_ratio=1.5)
+
+    result = get_constraint_violations(trial)
+
+    assert result[0] == pytest.approx(1.0)  # 3.0 - 2.0
+    assert result[1] == pytest.approx(1.0)  # 2.0 - 1.0
+    assert result[2] == pytest.approx(0.5)  # 1.5 - 1.0
+
+
+def test_get_constraint_violations_ignores_avg_bars_held():
+    # avg_bars_held is still tracked as a metric (see objective()) but is no
+    # longer gated as a constraint -- an arbitrarily low value must not
+    # affect feasibility now that BASELINE_MIN_AVG_BARS_HELD is gone.
+    trial = _trial(avg_bars_held=0.1, distance_atr_ratio=1.5, distance_atr_std=0.5, volatility_ratio=0.5)
+
+    result = get_constraint_violations(trial)
+
+    assert result == (0.0, 0.0, 0.0)
+
+
+# get_feasible_trials
+
+def _add_trial(study, state=TrialState.COMPLETE, **user_attrs):
+    values = [1.0, 1.0] if state == TrialState.COMPLETE else None
+    study.add_trial(create_trial(state=state, values=values, params={}, distributions={}, user_attrs=user_attrs))
+
+
+def test_get_feasible_trials_keeps_only_trials_within_bounds(monkeypatch):
+    _set_thresholds(monkeypatch)
+    study = optuna.create_study(directions=["minimize", "maximize"])
+    _add_trial(study, distance_atr_ratio=1.5, distance_atr_std=0.5, volatility_ratio=0.5)  # feasible
+    _add_trial(study, distance_atr_ratio=3.0, distance_atr_std=0.5, volatility_ratio=0.5)  # violates distance
+
+    result = get_feasible_trials(study)
+
+    assert len(result) == 1
+    assert result[0].user_attrs["distance_atr_ratio"] == 1.5
+
+
+def test_get_feasible_trials_works_without_constraints_system_attrs(monkeypatch):
+    # GridSampler never calls constraints_func, so it never writes
+    # system_attrs["constraints"] -- get_feasible_trials must judge
+    # feasibility from user_attrs alone, since this is exactly the state a
+    # grid study's trials are in.
+    _set_thresholds(monkeypatch)
+    study = optuna.create_study(directions=["minimize", "maximize"])
+    _add_trial(study, distance_atr_ratio=1.5, distance_atr_std=0.5, volatility_ratio=0.5)
+    _add_trial(study, distance_atr_ratio=3.0, distance_atr_std=0.5, volatility_ratio=0.5)
+    assert "constraints" not in study.trials[0].system_attrs
+
+    result = get_feasible_trials(study)
+
+    assert len(result) == 1
+
+
+def test_get_feasible_trials_excludes_non_complete_trials(monkeypatch):
+    _set_thresholds(monkeypatch)
+    study = optuna.create_study(directions=["minimize", "maximize"])
+    _add_trial(study, state=TrialState.PRUNED, distance_atr_ratio=1.5, distance_atr_std=0.5, volatility_ratio=0.5)
+    _add_trial(study, state=TrialState.FAIL, distance_atr_ratio=1.5, distance_atr_std=0.5, volatility_ratio=0.5)
+
+    assert get_feasible_trials(study) == []
+
+
+def test_get_feasible_trials_empty_study_returns_empty_list():
+    study = optuna.create_study(directions=["minimize", "maximize"])
+
+    assert get_feasible_trials(study) == []
+
+
+def test_get_feasible_trials_missing_attrs_are_excluded():
+    study = optuna.create_study(directions=["minimize", "maximize"])
+    _add_trial(study)  # no user_attrs at all -> FAILED_TRIAL_VALUE on all three constraints
+
+    assert get_feasible_trials(study) == []
 
 
 # _resolve_trial_count
@@ -163,7 +260,7 @@ def test_run_all_failed_candidate_does_not_abort_the_batch(monkeypatch, capsys):
     ]
     monkeypatch.setattr("scripts.phase1_optimizer.load_baseline_data", lambda currencies: {})
 
-    def fake_run_optimization(candidate, n_trials=None, currencies=None, cached_data=None):
+    def fake_run_optimization(candidate, n_trials=None, currencies=None, cached_data=None, n_jobs=1):
         if candidate.name == "bad":
             raise RuntimeError("boom")
 
@@ -175,6 +272,21 @@ def test_run_all_failed_candidate_does_not_abort_the_batch(monkeypatch, capsys):
     assert "Completed: ['good']" in out
     assert "Failed: ['bad']" in out
     assert "[ERROR] bad failed: boom" in out
+
+
+def test_run_all_forwards_n_jobs_to_run_optimization(monkeypatch):
+    monkeypatch.setattr("scripts.phase1_optimizer.load_baseline_data", lambda currencies: {})
+    captured = {}
+
+    def fake_run_optimization(candidate, n_trials=None, currencies=None, cached_data=None, n_jobs=1):
+        captured["n_jobs"] = n_jobs
+
+    monkeypatch.setattr("scripts.phase1_optimizer.run_optimization", fake_run_optimization)
+    candidates = [BaselineCandidate(name="x", param_space=[IntParam(1, 10)], n_trials=1)]
+
+    run_all(currencies=["EURUSD"], candidates=candidates, n_jobs=4)
+
+    assert captured["n_jobs"] == 4
 
 
 # evaluate_trial
@@ -226,6 +338,33 @@ def test_objective_happy_path_sets_user_attrs_and_returns_score_tuple(monkeypatc
     }
     assert len(cleared) == 1
     assert cleared[0][0][1] == f"*_{trial.number}.csv"
+
+    stored = trial.storage.get_trial(trial._trial_id)
+    assert stored.system_attrs["constraints"] == (0.0, 0.0, 0.0)
+
+
+def test_objective_sets_constraints_system_attr_even_for_grid_studies(monkeypatch):
+    # optuna-dashboard reads the "constraints" system_attr to show
+    # feasibility, but GridSampler never calls constraints_func -- so
+    # objective() must write it itself, regardless of which sampler the
+    # study uses, or a grid study's trials would show no feasibility at all.
+    _set_thresholds(monkeypatch)
+    metrics = BaselineMetrics(
+        whipsaw_frequency=10.0, avg_bars_held=9.0, distance_atr_ratio=3.0,
+        capture_efficiency=0.8, distance_atr_std=0.4, volatility_ratio=0.5,
+    )
+    monkeypatch.setattr(phase1_optimizer, "evaluate_trial", lambda **kwargs: metrics)
+    monkeypatch.setattr(phase1_optimizer, "clear_external_files", lambda *a, **k: None)
+    study = optuna.create_study(
+        directions=["minimize", "maximize"],
+        sampler=optuna.samplers.GridSampler({"p1": [1]}),
+    )
+    trial = study.ask()
+
+    objective(trial, "EMA", ["EURUSD"], {}, [IntParam(1, 1)])
+
+    stored = trial.storage.get_trial(trial._trial_id)
+    assert stored.system_attrs["constraints"] == pytest.approx((1.0, 0.0, 0.0))  # 3.0 - 2.0
 
 
 def test_objective_passes_suggested_parameters_and_indicator_name_to_evaluate_trial(monkeypatch):
@@ -380,3 +519,146 @@ def test_run_optimization_defaults_currencies_to_config_in_sample(monkeypatch):
     run_optimization(candidate, cached_data={})
 
     assert captured["currencies"] == ["EURUSD_SB", "GBPUSD_SB"]
+
+
+def test_run_optimization_uses_journal_storage(monkeypatch):
+    captured = {}
+    real_create_study = optuna.create_study
+
+    def fake_create_study(**kwargs):
+        captured["create_study_kwargs"] = kwargs
+        return real_create_study(directions=kwargs["directions"], sampler=kwargs["sampler"])
+
+    monkeypatch.setattr(phase1_optimizer.optuna, "create_study", fake_create_study)
+    monkeypatch.setattr(
+        phase1_optimizer, "objective",
+        lambda trial, indicator_name, currencies, cached_data, param_space: (1.0, 1.0),
+    )
+    candidate = BaselineCandidate(name="x", param_space=[IntParam(1, 1)], sampler="grid")
+
+    run_optimization(candidate, currencies=["EURUSD"], cached_data={})
+
+    from optuna.storages import JournalStorage
+    assert isinstance(captured["create_study_kwargs"]["storage"], JournalStorage)
+
+
+# OPTUNA_JOURNAL_PATH shared with phase2/phase5
+
+def test_optuna_journal_path_shared_with_other_phases():
+    # Phase 1/2/3 must all point at the same journal log so a single file
+    # holds every phase's studies -- each study name is randomly-coded and
+    # phase-tagged (see run_optimization), so sharing one file is safe and
+    # is exactly what "same journal storage as p2 and p3" means here.
+    assert OPTUNA_JOURNAL_PATH == phase2_optimizer.OPTUNA_JOURNAL_PATH == phase5_optimizer.OPTUNA_JOURNAL_PATH
+
+
+# _journal_storage
+
+def test_journal_storage_two_instances_on_same_path_see_the_same_study(tmp_path):
+    path = str(tmp_path / "journal.log")
+
+    study = optuna.create_study(directions=["minimize", "maximize"], storage=_journal_storage(path), study_name="s")
+    study.add_trial(create_trial(state=TrialState.COMPLETE, values=[1.0, 1.0], params={}))
+
+    reloaded = optuna.load_study(study_name="s", storage=_journal_storage(path))
+    assert len(reloaded.trials) == 1
+
+
+# _split_trial_counts
+
+def test_split_trial_counts_even_split():
+    assert _split_trial_counts(9, 3) == [3, 3, 3]
+
+
+def test_split_trial_counts_remainder_goes_to_first_workers():
+    assert _split_trial_counts(10, 3) == [4, 3, 3]
+
+
+# _run_worker_trials
+
+def test_run_worker_trials_loads_shared_study_and_runs_its_share(tmp_path, monkeypatch):
+    storage = str(tmp_path / "journal.log")
+    study_name = "worker_test_study"
+    optuna.create_study(directions=["minimize", "maximize"], storage=_journal_storage(storage), study_name=study_name)
+    monkeypatch.setattr(phase1_optimizer, "objective", lambda *a, **k: (1.0, 1.0))
+
+    _run_worker_trials(study_name, storage, 3, "EMA", ["EURUSD_SB"], {}, [IntParam(1, 10)])
+
+    study = optuna.load_study(study_name=study_name, storage=_journal_storage(storage))
+    assert len(study.trials) == 3
+
+
+def test_run_worker_trials_two_workers_on_same_path_share_one_study(tmp_path, monkeypatch):
+    storage = str(tmp_path / "journal.log")
+    study_name = "shared_study"
+    optuna.create_study(directions=["minimize", "maximize"], storage=_journal_storage(storage), study_name=study_name)
+    monkeypatch.setattr(phase1_optimizer, "objective", lambda *a, **k: (1.0, 1.0))
+
+    _run_worker_trials(study_name, storage, 2, "EMA", ["EURUSD_SB"], {}, [IntParam(1, 10)])
+    _run_worker_trials(study_name, storage, 3, "EMA", ["EURUSD_SB"], {}, [IntParam(1, 10)])
+
+    study = optuna.load_study(study_name=study_name, storage=_journal_storage(storage))
+    assert len(study.trials) == 5
+
+
+# run_optimization n_jobs
+
+def test_run_optimization_n_jobs_1_does_not_dispatch_workers(monkeypatch):
+    called = []
+    monkeypatch.setattr(phase1_optimizer, "_run_parallel", lambda *a, **k: called.append(1))
+    real_create_study = optuna.create_study
+    monkeypatch.setattr(
+        phase1_optimizer.optuna, "create_study",
+        lambda **kwargs: real_create_study(directions=kwargs["directions"], sampler=kwargs["sampler"]),
+    )
+    monkeypatch.setattr(
+        phase1_optimizer, "objective",
+        lambda trial, indicator_name, currencies, cached_data, param_space: (1.0, 1.0),
+    )
+    candidate = BaselineCandidate(name="x", param_space=[IntParam(1, 3)], sampler="grid")
+
+    study = run_optimization(candidate, currencies=["EURUSD_SB"], cached_data={}, n_jobs=1)
+
+    assert called == []
+    assert len(study.trials) == 3
+
+
+def test_run_optimization_n_jobs_dispatches_split_counts_and_reloads_study(tmp_path, monkeypatch):
+    storage = str(tmp_path / "journal.log")
+    monkeypatch.setattr(phase1_optimizer, "OPTUNA_JOURNAL_PATH", storage)
+    captured = {}
+
+    def fake_run_parallel(study_name, journal_path, counts, indicator_name, currencies, cached_data, param_space):
+        captured["counts"] = counts
+        # Simulate workers completing trials against the shared storage --
+        # the real _run_parallel does this out-of-process, but the parent's
+        # job is just to reload afterward, which is what this test checks.
+        study = optuna.load_study(study_name=study_name, storage=_journal_storage(journal_path))
+        for _ in range(sum(counts)):
+            study.add_trial(create_trial(state=TrialState.COMPLETE, values=[1.0, 1.0], params={}))
+
+    monkeypatch.setattr(phase1_optimizer, "_run_parallel", fake_run_parallel)
+    candidate = BaselineCandidate(name="x", param_space=[IntParam(1, 5)], sampler="grid")  # 5 combinations
+
+    study = run_optimization(candidate, currencies=["EURUSD_SB"], cached_data={}, n_jobs=2)
+
+    assert sum(captured["counts"]) == 5
+    assert len(captured["counts"]) == 2
+    assert len(study.trials) == 5
+
+@pytest.mark.filterwarnings("ignore::optuna.exceptions.ExperimentalWarning")
+def test_run_optimization_n_jobs_exceeding_trials_drops_empty_workers(tmp_path, monkeypatch):
+    storage = str(tmp_path / "journal.log")
+    monkeypatch.setattr(phase1_optimizer, "OPTUNA_JOURNAL_PATH", storage)
+    captured = {}
+    monkeypatch.setattr(
+        phase1_optimizer, "_run_parallel",
+        lambda study_name, storage_, counts, *a, **k: captured.update(counts=counts),
+    )
+    candidate = BaselineCandidate(name="x", param_space=[IntParam(1, 5)], sampler="nsga2", n_trials=2)
+
+    run_optimization(candidate, currencies=["EURUSD_SB"], cached_data={}, n_jobs=5)
+
+    # n_trials=2 split across 5 workers -> [1, 1, 0, 0, 0]; zero-trial
+    # workers must be dropped instead of spawning idle worker processes.
+    assert captured["counts"] == [1, 1]

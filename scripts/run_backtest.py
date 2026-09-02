@@ -32,7 +32,10 @@ def request_and_load_many(currencies: list[str], indicator: Indicator, trial: in
         path = os.path.join(Config.COMMON_DIR, f"{currency}_{indicator.name}_1440_{trial}.csv")
         if not os.path.exists(path):
             raise FileNotFoundError(f"Missing file: {path}")
-        result[currency] = load_indicator(path, num_buffers=indicator.num_buffers, indicator_name=indicator.label)
+        result[currency] = load_indicator(
+            path, num_buffers=indicator.num_buffers, indicator_name=indicator.label,
+            max_warmup_bars=indicator.max_warmup_bars,
+        )
     return result
 
 
@@ -40,9 +43,9 @@ def _fetch_optional(indicator: Indicator | None, cacheable: bool, cached_data: d
     """Resolve one indicator slot (baseline/c1/exit_indicator) against
     cached_data. Returns (is_cached, dfs): dfs is {} when `indicator` is
     None (slot unused) or already fully present in cached_data (pre-merged
-    by the caller -- e.g. Phase 2's fixed baseline, or Phase 3's fixed
-    baseline+C1 via load_phase3_cache) -- either way nothing to
-    re-request from MT4. `cacheable=False` (used for Phase 3's exit
+    by the caller -- e.g. Phase 2's fixed baseline, or Phase 5's fixed
+    baseline+C1 via load_phase5_cache) -- either way nothing to
+    re-request from MT4. `cacheable=False` (used for Phase 5's exit
     indicator, which varies every trial and is never pre-merged) always
     requests fresh when `indicator` is given, skipping the cached_data check
     entirely."""
@@ -189,8 +192,8 @@ def run_backtest(
         log_timing: Print how long data loading (MT4 request/read) vs. the
             Cerebro run took. Meant for a one-off diagnostic run to see where
             optimizer trial time actually goes, not for routine sweeps.
-        exit_indicator: Phase 3's independent exit indicator. Only meaningful
-            with strategy=Phase3Strategy -- ignored (and simply never
+        exit_indicator: Phase 5's independent exit indicator. Only meaningful
+            with strategy=Phase5Strategy -- ignored (and simply never
             requested/merged) otherwise.
     """
     t0 = time.perf_counter()
