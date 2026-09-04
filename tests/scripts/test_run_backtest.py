@@ -4,7 +4,7 @@ import backtrader as bt
 import pandas as pd
 import pytest
 
-from scripts.run_backtest import (
+from tradeforge.scripts.run_backtest import (
     _build_summary,
     _load_currency_data,
     _run_cerebro,

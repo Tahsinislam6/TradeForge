@@ -7,7 +7,7 @@ from pathlib import Path
 import optuna
 from functools import partial
 
-from scripts.run_backtest import run_backtest, request_and_load_many
+from tradeforge.scripts.run_backtest import run_backtest, request_and_load_many
 from tradeforge.backtest.algorithm import Phase2Strategy
 from tradeforge.backtest.candidates.c1_candidates import C1_CANDIDATES
 from tradeforge.backtest.candidates.candidate_types import C1Candidate
@@ -41,7 +41,7 @@ MIN_PROFIT_FACTOR = 0.9
 
 # ===== Parameters (edit these) =====
 # Fixed, already Phase-1-optimized baseline
-BASELINE = PriceCrossIndicator(name="Baseline", parameters=[32,2.6,18], buffer_values=[0], label="Baseline")
+BASELINE = PriceCrossIndicator(name="KAMA", parameters=[32,2.6,18], buffer_values=[0], label="Baseline")
 
 
 def get_constraint_violations(trial, min_trades: int, min_win_rate: float, min_avg_bars_held: float, max_drawdown: float, min_profit_factor: float):

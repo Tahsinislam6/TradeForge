@@ -3,8 +3,8 @@ import sys
 import pandas as pd
 import pytest
 
-import scripts.phase1_analyzer as phase1_analyzer
-from scripts.phase1_analyzer import main, print_error
+import tradeforge.scripts.phase1_analyzer as phase1_analyzer
+from tradeforge.scripts.phase1_analyzer import main, print_error
 from tradeforge.config import Config
 
 

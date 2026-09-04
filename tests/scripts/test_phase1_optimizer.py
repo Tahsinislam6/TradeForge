@@ -4,10 +4,10 @@ import optuna
 import pytest
 from optuna.trial import TrialState, create_trial
 
-import scripts.phase1_optimizer as phase1_optimizer
-import scripts.phase2_optimizer as phase2_optimizer
-import scripts.phase5_optimizer as phase5_optimizer
-from scripts.phase1_optimizer import (
+import tradeforge.scripts.phase1_optimizer as phase1_optimizer
+import tradeforge.scripts.phase2_optimizer as phase2_optimizer
+import tradeforge.scripts.phase5_optimizer as phase5_optimizer
+from tradeforge.scripts.phase1_optimizer import (
     FAILED_TRIAL_VALUE,
     OPTUNA_JOURNAL_PATH,
     _journal_storage,

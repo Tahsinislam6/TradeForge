@@ -7,7 +7,7 @@ from pathlib import Path
 import optuna
 from functools import partial
 
-from scripts.run_backtest import request_and_load_many, run_backtest
+from tradeforge.scripts.run_backtest import request_and_load_many, run_backtest
 from tradeforge.backtest.algorithm import Phase2Strategy, Phase5Strategy
 from tradeforge.backtest.candidates.exit_candidates import EXIT_CANDIDATES
 from tradeforge.backtest.candidates.candidate_types import ExitCandidate

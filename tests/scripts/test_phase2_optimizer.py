@@ -5,7 +5,7 @@ import optuna
 import pytest
 from optuna.trial import TrialState, create_trial
 
-from scripts.phase2_optimizer import (
+from tradeforge.scripts.phase2_optimizer import (
     FAILED_TRIAL_VALUE,
     _build_sampler,
     _journal_storage,
