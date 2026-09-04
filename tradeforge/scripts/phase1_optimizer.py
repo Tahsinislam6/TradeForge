@@ -319,41 +319,17 @@ def evaluate_trial(
     raise RuntimeError(f"Indicator request failed for trial {trial_number}")
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run NSGA-II baseline optimisation for an MT4 indicator.")
-    parser.add_argument("indicator_name", type=str, nargs="?", default=None,
-                         help="MT4 indicator name (e.g. EMA) for a one-off run outside BASELINE_CANDIDATES. "
-                              "Omit to sweep every entry in BASELINE_CANDIDATES instead.")
-    parser.add_argument("trials", type=int, nargs="?", default=None,
-                         help="Number of Optuna trials. Required for a one-off indicator_name run; otherwise "
-                              "the default for any BASELINE_CANDIDATES entry that doesn't set its own n_trials.")
-    parser.add_argument("--currencies", nargs="+", default=None, metavar="CURRENCY",
-                         help=f"Currency pairs to test. Default: {' '.join(Config.IN_SAMPLE)}")
-    parser.add_argument("--only", type=str, default=None,
-                         help="Only sweep the BASELINE_CANDIDATES entry with this name "
-                              "(case-insensitive). Ignored if indicator_name is given.")
-    parser.add_argument("--workers", type=int, default=1,
-                         help="Number of worker processes to split each candidate's trials "
-                              "across. Workers coordinate through the shared JournalStorage "
-                              "log, so this is safe to raise up to roughly your CPU core "
-                              "count. Default 1 (sequential, in-process).")
-    args = parser.parse_args()
+def run_p1_optimizer(trials: int=None, currencies=None, only: str=None, workers: int=1):
+    if not currencies:
+        currencies = Config.IN_SAMPLE
 
-    currencies = args.currencies or Config.IN_SAMPLE
-
-    if args.indicator_name:
-        if args.trials is None:
-            raise SystemExit("trials is required for a one-off indicator_name run")
-        candidate = BaselineCandidate(name=args.indicator_name, param_space=[IntParam(1, 100)], n_trials=args.trials)
-        run_optimization(candidate, currencies=currencies, n_jobs=args.workers)
-    else:
-        candidates = BASELINE_CANDIDATES
-        if args.only:
-            candidates = [c for c in BASELINE_CANDIDATES if c.name.lower() == args.only.lower()]
-            if not candidates:
-                available = ", ".join(c.name for c in BASELINE_CANDIDATES)
-                raise SystemExit(f"No BASELINE_CANDIDATES entry named '{args.only}'. Available: {available}")
-        run_all(currencies=currencies, n_trials=args.trials, candidates=candidates, n_jobs=args.workers)
+    candidates = BASELINE_CANDIDATES
+    if only:
+        candidates = [c for c in BASELINE_CANDIDATES if c.name.lower() == only.lower()]
+        if not candidates:
+            available = ", ".join(c.name for c in BASELINE_CANDIDATES)
+            raise SystemExit(f"No BASELINE_CANDIDATES entry named '{only}'. Available: {available}")
+    run_all(currencies=currencies, n_trials=trials, candidates=candidates, n_jobs=workers)
 
     send_notification("Baseline optimization completed")
 
