@@ -327,8 +327,7 @@ def run_p1_optimizer(trials: int=None, currencies=None, only: str=None, workers:
     if only:
         candidates = [c for c in BASELINE_CANDIDATES if c.name.lower() == only.lower()]
         if not candidates:
-            available = ", ".join(c.name for c in BASELINE_CANDIDATES)
-            raise SystemExit(f"No BASELINE_CANDIDATES entry named '{only}'. Available: {available}")
+            raise SystemExit(f"No CANDIDATES entry named '{only}'")
     run_all(currencies=currencies, n_trials=trials, candidates=candidates, n_jobs=workers)
 
     send_notification("Baseline optimization completed")
