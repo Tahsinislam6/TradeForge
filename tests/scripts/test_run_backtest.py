@@ -192,6 +192,47 @@ def test_load_currency_data_without_exit_indicator_omits_it_from_kwargs():
     assert "exit_indicator" not in strategy_kwargs
 
 
+def test_load_currency_data_with_c2_requests_it_and_extends_kwargs(monkeypatch):
+    """Phase 3 sweeps hold baseline+C1 fixed (merged into cached_data by
+    load_phase3_cache) and vary C2 every trial -- c2 must always be
+    requested fresh, same cacheable=False treatment as exit_indicator."""
+    baseline = _indicator(name="Baseline", col_names=["Baseline_Buffer_0"])
+    c1 = _indicator(name="C1", col_names=["C1_Buffer_0"])
+    c2 = _indicator(name="C2", col_names=["C2_Buffer_0"])
+    cached_data = {
+        "EURUSD_SB": _ohlc_df(["2024.01.01 00:00"])
+        .assign(Baseline_Buffer_0=[1.5])
+        .assign(C1_Buffer_0=[0.7])
+    }
+    requested_for = []
+
+    def fake_request(currencies, indicator, trial):
+        requested_for.append(indicator.name)
+        return {"EURUSD_SB": pd.DataFrame({"DateTime": ["2024.01.01 00:00"], "C2_Buffer_0": [0.3]})}
+
+    monkeypatch.setattr("tradeforge.scripts.run_backtest.request_and_load_many", fake_request)
+
+    indicator_cols, strategy_kwargs, dfs_by_currency = _load_currency_data(
+        ["EURUSD_SB"], baseline, c1, trial=0, cached_data=cached_data, print_results=False, c2=c2,
+    )
+
+    assert requested_for == ["C2"]  # baseline+c1 cached, only c2 requested
+    assert indicator_cols == ["Baseline_Buffer_0", "ATR_Buffer_0", "C1_Buffer_0", "C2_Buffer_0"]
+    assert strategy_kwargs == {"baseline": baseline, "c1": c1, "c2": c2}
+    assert dfs_by_currency["EURUSD_SB"]["C2_Buffer_0"].tolist() == [0.3]
+
+
+def test_load_currency_data_without_c2_omits_it_from_kwargs():
+    baseline = _indicator(name="Baseline", col_names=["Baseline_Buffer_0"])
+    cached_data = {"EURUSD_SB": _ohlc_df(["2024.01.01 00:00"]).assign(Baseline_Buffer_0=[1.5])}
+
+    _, strategy_kwargs, _ = _load_currency_data(
+        ["EURUSD_SB"], baseline, None, trial=0, cached_data=cached_data, print_results=False,
+    )
+
+    assert "c2" not in strategy_kwargs
+
+
 def test_load_currency_data_print_results_true_prints_data_range(capsys):
     baseline = _indicator(name="Baseline", col_names=["Baseline_Buffer_0"])
     cached_data = {
@@ -386,8 +427,8 @@ def test_run_backtest_wires_helpers_and_returns_build_summary_result(monkeypatch
     sentinel_summary = SimpleNamespace(baseline="B", final_value=1.0)
     calls = {}
 
-    def fake_load(currencies, baseline, c1, trial, cached_data, print_results, exit_indicator=None):
-        calls["load"] = (currencies, baseline, c1, trial, cached_data, print_results, exit_indicator)
+    def fake_load(currencies, baseline, c1, trial, cached_data, print_results, exit_indicator=None, c2=None):
+        calls["load"] = (currencies, baseline, c1, trial, cached_data, print_results, exit_indicator, c2)
         return (["Baseline_Buffer_0"], {"baseline": baseline}, {"EURUSD_SB": "df"})
 
     def fake_run_cerebro(currencies, dfs_by_currency, indicator_cols, strategy, strategy_kwargs, initial_cash, plot):
@@ -406,7 +447,7 @@ def test_run_backtest_wires_helpers_and_returns_build_summary_result(monkeypatch
     result = run_backtest(baseline, currencies=["EURUSD_SB"], trial=2, initial_cash=5_000.0, print_results=False)
 
     assert result is sentinel_summary
-    assert calls["load"] == (["EURUSD_SB"], baseline, None, 2, None, False, None)
+    assert calls["load"] == (["EURUSD_SB"], baseline, None, 2, None, False, None, None)
     assert calls["cerebro"][5] == 5_000.0
     assert calls["cerebro"][6] is False
     assert calls["summary"] == ("strat-obj", "cerebro-obj", baseline, 5_000.0, ["EURUSD_SB"])
@@ -416,7 +457,7 @@ def test_run_backtest_forwards_exit_indicator_to_load_currency_data(monkeypatch)
     calls = {}
     monkeypatch.setattr(
         "tradeforge.scripts.run_backtest._load_currency_data",
-        lambda currencies, baseline, c1, trial, cached_data, print_results, exit_indicator=None:
+        lambda currencies, baseline, c1, trial, cached_data, print_results, exit_indicator=None, c2=None:
             calls.update(exit_indicator=exit_indicator) or ([], {}, {}),
     )
     monkeypatch.setattr("tradeforge.scripts.run_backtest._run_cerebro", lambda *a, **k: ("cerebro-obj", "strat-obj"))
@@ -426,6 +467,22 @@ def test_run_backtest_forwards_exit_indicator_to_load_currency_data(monkeypatch)
     run_backtest(SimpleNamespace(name="Baseline"), currencies=["EURUSD_SB"], exit_indicator=exit_indicator, print_results=False)
 
     assert calls["exit_indicator"] is exit_indicator
+
+
+def test_run_backtest_forwards_c2_to_load_currency_data(monkeypatch):
+    calls = {}
+    monkeypatch.setattr(
+        "tradeforge.scripts.run_backtest._load_currency_data",
+        lambda currencies, baseline, c1, trial, cached_data, print_results, exit_indicator=None, c2=None:
+            calls.update(c2=c2) or ([], {}, {}),
+    )
+    monkeypatch.setattr("tradeforge.scripts.run_backtest._run_cerebro", lambda *a, **k: ("cerebro-obj", "strat-obj"))
+    monkeypatch.setattr("tradeforge.scripts.run_backtest._build_summary", lambda *a, **k: {})
+
+    c2 = SimpleNamespace(name="C2")
+    run_backtest(SimpleNamespace(name="Baseline"), currencies=["EURUSD_SB"], c2=c2, print_results=False)
+
+    assert calls["c2"] is c2
 
 
 # print_summary
