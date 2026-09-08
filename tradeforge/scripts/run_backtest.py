@@ -167,7 +167,6 @@ def _build_summary(strat, cerebro, baseline: Indicator, initial_cash: float) -> 
 
 
 def run_backtest(
-    currencies: list[str],
     baseline: Indicator,
     c1: Indicator | None = None,
     strategy=Phase1Strategy,
@@ -178,6 +177,7 @@ def run_backtest(
     print_results: bool = True,
     log_timing: bool = False,
     exit_indicator: Indicator | None = None,
+    currencies: list[str] = None,
 ) -> dict:
     """Backtest a baseline (+ optional C1) (+ optional exit indicator)
     strategy on one or more currency pairs in a single Cerebro run, sharing
@@ -196,6 +196,9 @@ def run_backtest(
             with strategy=Phase5Strategy -- ignored (and simply never
             requested/merged) otherwise.
     """
+    if not currencies:
+        currencies = Config.IN_SAMPLE
+        
     t0 = time.perf_counter()
     indicator_cols, strategy_kwargs, dfs_by_currency = _load_currency_data(
         currencies, baseline, c1, trial, cached_data, print_results, exit_indicator=exit_indicator,
@@ -233,7 +236,7 @@ def print_summary(summary: dict):
     print()
 
 
-if __name__ == "__main__":
+def run_bt_analysis(currencies):
     # python -m scripts.run_backtest
     # Phase 1 — baseline only
     # summary = run_backtest(
