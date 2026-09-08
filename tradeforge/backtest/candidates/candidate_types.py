@@ -38,12 +38,17 @@ class _IndicatorCandidate:
     with FixedParam (held constant) in whatever order the indicator expects
     its parameters.
 
-    C1Candidate (Phase 2) and ExitCandidate (Phase 5) are identical in every
-    field -- an exit indicator is wired up the same way a C1 is, just
-    checked against open positions instead of gating entries (see
-    Phase5Strategy in tradeforge/backtest/algorithm.py) -- so both subclass
-    this instead of duplicating the shape. Kept as two distinct types rather
-    than one shared class so a function signature like
+    C1Candidate (Phase 2), C2Candidate (Phase 3), and ExitCandidate (Phase 5)
+    are identical in every field -- a C2 is wired up via Indicator.setup()/
+    self._indicators the same way a C1 is, so it must equally agree on
+    direction before an entry is allowed, but unlike C1 it's
+    confirmation-only: it's left out of self._trigger_indicators, so its
+    own cross can never itself fire an entry (see Phase2Strategy/Phase3Strategy in
+    tradeforge/backtest/algorithm.py). An exit indicator is wired up the
+    same way too, just checked against open positions instead of gating
+    entries (see Phase5Strategy) -- so all three subclass this instead of
+    duplicating the shape. Kept as distinct
+    types rather than one shared class so a function signature like
     `exit_spec: ExitCandidate` stays self-documenting about which pipeline
     stage it belongs to.
 
@@ -73,6 +78,15 @@ class C1Candidate(_IndicatorCandidate):
     hard constraints are MIN_TRADES/MIN_WIN_RATE/MIN_AVG_BARS_HELD/
     MAX_DRAWDOWN/MIN_PROFIT_FACTOR (scripts/phase2_optimizer.py);
     sampler="grid" only applies the MIN_TRADES prune inside objective()."""
+
+
+@dataclass
+class C2Candidate(_IndicatorCandidate):
+    """One C2 (secondary confirmation) indicator to sweep in a Phase 3 batch
+    run, against a frozen baseline+C1. See _IndicatorCandidate for field
+    meanings. With sampler="nsga2", Phase 3's hard constraints are
+    MIN_TRADES/MIN_WIN_RATE_LIFT/MIN_PROFIT_FACTOR/
+    MIN_TOTAL_LOSSES_REDUCTION_PCT (scripts/phase3_optimizer.py)."""
 
 
 @dataclass

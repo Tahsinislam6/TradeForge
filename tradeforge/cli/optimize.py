@@ -2,6 +2,7 @@ import argparse
 
 from tradeforge.scripts.phase1_optimizer import run_p1_optimizer
 from tradeforge.scripts.phase2_optimizer import run_p2_optimizer
+from tradeforge.scripts.phase3_optimizer import run_p3_optimizer
 
 
 def _common_optimizer_args() -> argparse.ArgumentParser:
@@ -22,22 +23,32 @@ def _common_optimizer_args() -> argparse.ArgumentParser:
                         "the default for any CANDIDATES entry that doesn't set its own n_trials.")
     return parent
 
+def _common_bt_optimizer_args() -> argparse.ArgumentParser:
+    parent = argparse.ArgumentParser(add_help=False)
+    parent.add_argument("--log-timing", action="store_true",
+                                 help="Print per-trial data_load/backtest timing breakdown. "
+                                      "Intended for a short diagnostic run (small --trials), not routine sweeps.")
+    return parent
+
 
 def register(subparser: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
     optimize_parser = subparser.add_parser("optimize", help="Optimize Parameters")
     optimize_sub = optimize_parser.add_subparsers(dest="phase", required=True)
     common = _common_optimizer_args()
+    common_bt = _common_bt_optimizer_args()
 
     p1 = optimize_sub.add_parser("P1", parents=[common])
     p1.set_defaults(func=lambda args: run_p1_optimizer(
         trials=args.trials, currencies=args.currencies, only=args.only, workers=args.workers)
     )
 
-    p2 = optimize_sub.add_parser("P2", parents=[common])
-    p2.add_argument("--log-timing", action="store_true",
-                             help="Print per-trial data_load/backtest timing breakdown. "
-                                  "Intended for a short diagnostic run (small --trials), not routine sweeps.")
+    p2 = optimize_sub.add_parser("P2", parents=[common, common_bt])
     p2.set_defaults(func = lambda args: run_p2_optimizer(
+        trials=args.trials, currencies=args.currencies, only=args.only, workers=args.workers, log_timing=args.log_timing
+    ))
+
+    p3 = optimize_sub.add_parser("P3", parents=[common, common_bt])
+    p3.set_defaults(func = lambda args: run_p3_optimizer(
         trials=args.trials, currencies=args.currencies, only=args.only, workers=args.workers, log_timing=args.log_timing
     ))
 
