@@ -69,10 +69,10 @@ def test_compute_reference_extracts_the_four_reference_numbers(monkeypatch):
 
     def fake_run_backtest(**kwargs):
         captured.update(kwargs)
-        return {
-            "win_rate": 62.0, "profit_factor": 1.8, "avg_bars_held": 9.0, "avg_loss": -25.0,
-            "total_trades": 300,  # extra fields present in a real summary must be ignored
-        }
+        return SimpleNamespace(
+            win_rate=62.0, profit_factor=1.8, avg_bars_held=9.0, avg_loss=-25.0,
+            total_trades=300,  # extra fields present in a real summary must be ignored
+        )
 
     monkeypatch.setattr("scripts.phase5_optimizer.run_backtest", fake_run_backtest)
     baseline = SimpleNamespace(name="Baseline")
@@ -233,10 +233,10 @@ def _reference(win_rate=55.0, avg_loss=-30.0):
 def test_objective_happy_path_sets_user_attrs_and_returns_score(monkeypatch):
     monkeypatch.setattr(
         "scripts.phase5_optimizer.run_backtest",
-        lambda **kwargs: {
-            "total_trades": 250, "win_rate": 65.0, "profit_factor": 1.5,
-            "avg_loss": -15.0, "pct_winners_closed_early": 10.0,
-        },
+        lambda **kwargs: SimpleNamespace(
+            total_trades=250, win_rate=65.0, profit_factor=1.5,
+            avg_loss=-15.0, pct_winners_closed_early=10.0,
+        ),
     )
     monkeypatch.setattr("scripts.phase5_optimizer.clear_external_files", lambda *a, **k: None)
     trial = _ask()
@@ -258,10 +258,10 @@ def test_objective_happy_path_sets_user_attrs_and_returns_score(monkeypatch):
 def test_objective_score_caps_avg_loss_reduction_and_win_rate_lift_contributions(monkeypatch):
     monkeypatch.setattr(
         "scripts.phase5_optimizer.run_backtest",
-        lambda **kwargs: {
-            "total_trades": 250, "win_rate": 100.0, "profit_factor": 1.5,
-            "avg_loss": 0.0, "pct_winners_closed_early": 10.0,
-        },
+        lambda **kwargs: SimpleNamespace(
+            total_trades=250, win_rate=100.0, profit_factor=1.5,
+            avg_loss=0.0, pct_winners_closed_early=10.0,
+        ),
     )
     monkeypatch.setattr("scripts.phase5_optimizer.clear_external_files", lambda *a, **k: None)
     baseline = SimpleNamespace(name="Baseline", parameters=[1])
@@ -277,10 +277,10 @@ def test_objective_zero_reference_avg_loss_gives_zero_reduction(monkeypatch):
     the reduction ratio would divide by zero otherwise."""
     monkeypatch.setattr(
         "scripts.phase5_optimizer.run_backtest",
-        lambda **kwargs: {
-            "total_trades": 250, "win_rate": 65.0, "profit_factor": 1.5,
-            "avg_loss": -5.0, "pct_winners_closed_early": 10.0,
-        },
+        lambda **kwargs: SimpleNamespace(
+            total_trades=250, win_rate=65.0, profit_factor=1.5,
+            avg_loss=-5.0, pct_winners_closed_early=10.0,
+        ),
     )
     monkeypatch.setattr("scripts.phase5_optimizer.clear_external_files", lambda *a, **k: None)
     baseline = SimpleNamespace(name="Baseline", parameters=[1])
@@ -295,10 +295,10 @@ def test_objective_passes_correct_kwargs_to_run_backtest(monkeypatch):
     captured = {}
     monkeypatch.setattr(
         "scripts.phase5_optimizer.run_backtest",
-        lambda **kwargs: captured.update(kwargs) or {
-            "total_trades": 250, "win_rate": 65.0, "profit_factor": 1.5,
-            "avg_loss": -15.0, "pct_winners_closed_early": 10.0,
-        },
+        lambda **kwargs: captured.update(kwargs) or SimpleNamespace(
+            total_trades=250, win_rate=65.0, profit_factor=1.5,
+            avg_loss=-15.0, pct_winners_closed_early=10.0,
+        ),
     )
     monkeypatch.setattr("scripts.phase5_optimizer.clear_external_files", lambda *a, **k: None)
     baseline = SimpleNamespace(name="Baseline", parameters=[1])
@@ -321,10 +321,10 @@ def test_objective_line_cross_candidate_passes_cross_level_to_exit_indicator(mon
     captured = {}
     monkeypatch.setattr(
         "scripts.phase5_optimizer.run_backtest",
-        lambda **kwargs: captured.update(kwargs) or {
-            "total_trades": 250, "win_rate": 65.0, "profit_factor": 1.5,
-            "avg_loss": -15.0, "pct_winners_closed_early": 10.0,
-        },
+        lambda **kwargs: captured.update(kwargs) or SimpleNamespace(
+            total_trades=250, win_rate=65.0, profit_factor=1.5,
+            avg_loss=-15.0, pct_winners_closed_early=10.0,
+        ),
     )
     monkeypatch.setattr("scripts.phase5_optimizer.clear_external_files", lambda *a, **k: None)
     baseline = SimpleNamespace(name="Baseline", parameters=[1])
@@ -357,10 +357,10 @@ def test_objective_prunes_and_still_clears_files_when_run_backtest_raises(monkey
 def test_objective_prunes_when_total_trades_at_or_below_minimum(monkeypatch):
     monkeypatch.setattr(
         "scripts.phase5_optimizer.run_backtest",
-        lambda **kwargs: {
-            "total_trades": 200, "win_rate": 65.0, "profit_factor": 1.5,
-            "avg_loss": -15.0, "pct_winners_closed_early": 10.0,
-        },
+        lambda **kwargs: SimpleNamespace(
+            total_trades=200, win_rate=65.0, profit_factor=1.5,
+            avg_loss=-15.0, pct_winners_closed_early=10.0,
+        ),
     )
     monkeypatch.setattr("scripts.phase5_optimizer.clear_external_files", lambda *a, **k: None)
     baseline = SimpleNamespace(name="Baseline", parameters=[1])

@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from tradeforge.scripts.run_backtest import (
+    BacktestSummary,
     _build_summary,
     _load_currency_data,
     _run_cerebro,
@@ -299,16 +300,16 @@ def test_build_summary_assembles_all_fields():
     cerebro = _fake_cerebro(11_000.0)
     baseline = SimpleNamespace(name="MyBaseline")
 
-    summary = _build_summary(strat, cerebro, baseline, initial_cash=10_000.0)
+    summary = _build_summary(strat, cerebro, baseline, initial_cash=10_000.0, currencies=["EURUSD_SB"])
 
-    assert summary["baseline"] == "MyBaseline"
-    assert summary["final_value"] == 11_000.0
-    assert summary["net_pnl"] == pytest.approx(1_000.0)
-    assert summary["return_pct"] == pytest.approx(10.0)
-    assert summary["sharpe"] == pytest.approx(1.2)
-    assert summary["max_drawdown"] == pytest.approx(5.0)
-    assert summary["total_trades"] == 5
-    assert summary["profit_factor"] == pytest.approx(2.5)
+    assert summary.baseline == "MyBaseline"
+    assert summary.final_value == 11_000.0
+    assert summary.net_pnl == pytest.approx(1_000.0)
+    assert summary.return_pct == pytest.approx(10.0)
+    assert summary.sharpe == pytest.approx(1.2)
+    assert summary.max_drawdown == pytest.approx(5.0)
+    assert summary.total_trades == 5
+    assert summary.profit_factor == pytest.approx(2.5)
 
 
 def test_build_summary_defaults_missing_analyzer_keys():
@@ -321,11 +322,11 @@ def test_build_summary_defaults_missing_analyzer_keys():
     cerebro = _fake_cerebro(10_000.0)
     baseline = SimpleNamespace(name="MyBaseline")
 
-    summary = _build_summary(strat, cerebro, baseline, initial_cash=10_000.0)
+    summary = _build_summary(strat, cerebro, baseline, initial_cash=10_000.0, currencies=["EURUSD_SB"])
 
-    assert summary["return_pct"] == 0.0
-    assert summary["sharpe"] is None
-    assert summary["max_drawdown"] == 0.0
+    assert summary.return_pct == 0.0
+    assert summary.sharpe is None
+    assert summary.max_drawdown == 0.0
 
 
 def test_build_summary_derives_avg_loss_and_avg_win():
@@ -338,12 +339,12 @@ def test_build_summary_derives_avg_loss_and_avg_win():
     cerebro = _fake_cerebro(10_050.0)
     baseline = SimpleNamespace(name="MyBaseline")
 
-    summary = _build_summary(strat, cerebro, baseline, initial_cash=10_000.0)
+    summary = _build_summary(strat, cerebro, baseline, initial_cash=10_000.0, currencies=["EURUSD_SB"])
 
-    assert summary["gross_profit"] == pytest.approx(90.0)
-    assert summary["gross_loss"] == pytest.approx(-40.0)
-    assert summary["avg_win"] == pytest.approx(30.0)
-    assert summary["avg_loss"] == pytest.approx(-20.0)
+    assert summary.gross_profit == pytest.approx(90.0)
+    assert summary.gross_loss == pytest.approx(-40.0)
+    assert summary.avg_win == pytest.approx(30.0)
+    assert summary.avg_loss == pytest.approx(-20.0)
 
 
 def test_build_summary_carries_exit_reason_metrics_through():
@@ -357,10 +358,10 @@ def test_build_summary_carries_exit_reason_metrics_through():
     cerebro = _fake_cerebro(10_050.0)
     baseline = SimpleNamespace(name="MyBaseline")
 
-    summary = _build_summary(strat, cerebro, baseline, initial_cash=10_000.0)
+    summary = _build_summary(strat, cerebro, baseline, initial_cash=10_000.0, currencies=["EURUSD_SB"])
 
-    assert summary["pct_winners_closed_early"] == pytest.approx(25.0)
-    assert summary["avg_loss_by_reason"] == {"stop_loss": -20.0}
+    assert summary.pct_winners_closed_early == pytest.approx(25.0)
+    assert summary.avg_loss_by_reason == {"stop_loss": -20.0}
 
 
 def test_build_summary_zero_lost_or_won_gives_zero_avg():
@@ -373,16 +374,16 @@ def test_build_summary_zero_lost_or_won_gives_zero_avg():
     cerebro = _fake_cerebro(10_060.0)
     baseline = SimpleNamespace(name="MyBaseline")
 
-    summary = _build_summary(strat, cerebro, baseline, initial_cash=10_000.0)
+    summary = _build_summary(strat, cerebro, baseline, initial_cash=10_000.0, currencies=["EURUSD_SB"])
 
-    assert summary["avg_loss"] == 0.0
-    assert summary["avg_win"] == pytest.approx(20.0)
+    assert summary.avg_loss == 0.0
+    assert summary.avg_win == pytest.approx(20.0)
 
 
 # run_backtest (orchestration)
 
-def test_run_backtest_wires_helpers_and_merges_currencies_into_result(monkeypatch):
-    sentinel_summary = {"baseline": "B", "final_value": 1.0}
+def test_run_backtest_wires_helpers_and_returns_build_summary_result(monkeypatch):
+    sentinel_summary = SimpleNamespace(baseline="B", final_value=1.0)
     calls = {}
 
     def fake_load(currencies, baseline, c1, trial, cached_data, print_results, exit_indicator=None):
@@ -393,8 +394,8 @@ def test_run_backtest_wires_helpers_and_merges_currencies_into_result(monkeypatc
         calls["cerebro"] = (currencies, dfs_by_currency, indicator_cols, strategy, strategy_kwargs, initial_cash, plot)
         return ("cerebro-obj", "strat-obj")
 
-    def fake_build_summary(strat, cerebro, baseline, initial_cash):
-        calls["summary"] = (strat, cerebro, baseline, initial_cash)
+    def fake_build_summary(strat, cerebro, baseline, initial_cash, currencies):
+        calls["summary"] = (strat, cerebro, baseline, initial_cash, currencies)
         return sentinel_summary
 
     monkeypatch.setattr("scripts.run_backtest._load_currency_data", fake_load)
@@ -404,11 +405,11 @@ def test_run_backtest_wires_helpers_and_merges_currencies_into_result(monkeypatc
     baseline = SimpleNamespace(name="Baseline")
     result = run_backtest(["EURUSD_SB"], baseline, trial=2, initial_cash=5_000.0, print_results=False)
 
-    assert result == {"currencies": ["EURUSD_SB"], **sentinel_summary}
+    assert result is sentinel_summary
     assert calls["load"] == (["EURUSD_SB"], baseline, None, 2, None, False, None)
     assert calls["cerebro"][5] == 5_000.0
     assert calls["cerebro"][6] is False
-    assert calls["summary"] == ("strat-obj", "cerebro-obj", baseline, 5_000.0)
+    assert calls["summary"] == ("strat-obj", "cerebro-obj", baseline, 5_000.0, ["EURUSD_SB"])
 
 
 def test_run_backtest_forwards_exit_indicator_to_load_currency_data(monkeypatch):
@@ -430,14 +431,15 @@ def test_run_backtest_forwards_exit_indicator_to_load_currency_data(monkeypatch)
 # print_summary
 
 def _summary(**overrides):
-    base = {
-        "currencies": ["EURUSD_SB"], "baseline": "Baseline", "initial_cash": 10_000.0,
-        "final_value": 11_000.0, "net_pnl": 1_000.0, "return_pct": 10.0, "sharpe": 1.5,
-        "max_drawdown": 5.0, "total_trades": 4, "won": 3, "lost": 1, "win_rate": 75.0,
-        "profit_factor": 2.0, "avg_bars_held": 4.0, "min_bars_held": 1, "max_bars_held": 8,
-    }
+    base = dict(
+        currencies=["EURUSD_SB"], baseline="Baseline", initial_cash=10_000.0,
+        final_value=11_000.0, net_pnl=1_000.0, return_pct=10.0, sharpe=1.5,
+        max_drawdown=5.0, total_trades=4, won=3, lost=1, win_rate=75.0,
+        profit_factor=2.0, avg_bars_held=4.0, min_bars_held=1, max_bars_held=8,
+        gross_profit=0.0, gross_loss=0.0, avg_win=0.0, avg_loss=0.0,
+    )
     base.update(overrides)
-    return base
+    return BacktestSummary(**base)
 
 
 def test_print_summary_happy_path(capsys):

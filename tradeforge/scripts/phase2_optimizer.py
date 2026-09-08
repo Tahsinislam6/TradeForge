@@ -105,17 +105,17 @@ def objective(trial: optuna.Trial, currencies: list[str], baseline: Indicator, c
         # pile up in Config.COMMON_DIR across a whole grid sweep.
         clear_external_files(Config.COMMON_DIR, f"*_{trial.number}.csv")
 
-    trial.set_user_attr("total_trades", summary["total_trades"])
-    trial.set_user_attr("win_rate", summary["win_rate"])
-    trial.set_user_attr("avg_bars_held", summary["avg_bars_held"])
-    trial.set_user_attr("max_drawdown", summary["max_drawdown"])
-    trial.set_user_attr("profit_factor", summary["profit_factor"])
-    trial.set_user_attr("avg_loss", summary["avg_loss"])
+    trial.set_user_attr("total_trades", summary.total_trades)
+    trial.set_user_attr("win_rate", summary.win_rate)
+    trial.set_user_attr("avg_bars_held", summary.avg_bars_held)
+    trial.set_user_attr("max_drawdown", summary.max_drawdown)
+    trial.set_user_attr("profit_factor", summary.profit_factor)
+    trial.set_user_attr("avg_loss", summary.avg_loss)
 
-    total_trades = summary["total_trades"]
-    win_rate = summary["win_rate"]
-    avg_bars_held = summary["avg_bars_held"]
-    profit_factor = summary["profit_factor"]
+    total_trades = summary.total_trades
+    win_rate = summary.win_rate
+    avg_bars_held = summary.avg_bars_held
+    profit_factor = summary.profit_factor
 
     if total_trades <= MIN_TRADES:
         raise optuna.exceptions.TrialPruned()

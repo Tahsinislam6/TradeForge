@@ -91,10 +91,10 @@ def compute_reference(currencies: list[str], baseline: Indicator, c1: Indicator,
         print_results=False,
     )
     return {
-        "win_rate":      summary["win_rate"],
-        "profit_factor": summary["profit_factor"],
-        "avg_bars_held": summary["avg_bars_held"],
-        "avg_loss":      summary["avg_loss"],
+        "win_rate":      summary.win_rate,
+        "profit_factor": summary.profit_factor,
+        "avg_bars_held": summary.avg_bars_held,
+        "avg_loss":      summary.avg_loss,
     }
 
 
@@ -174,18 +174,18 @@ def objective(
         clear_external_files(Config.COMMON_DIR, f"*_{trial.number}.csv")
 
     avg_loss_reduction_pct = (
-        (1 - abs(summary["avg_loss"]) / abs(reference["avg_loss"])) * 100
+        (1 - abs(summary.avg_loss) / abs(reference["avg_loss"])) * 100
         if reference["avg_loss"] else 0.0
     )
-    win_rate_lift = summary["win_rate"] - reference["win_rate"]
+    win_rate_lift = summary.win_rate - reference["win_rate"]
 
     trial.set_user_attr("avg_loss_reduction_pct", avg_loss_reduction_pct)
     trial.set_user_attr("win_rate_lift", win_rate_lift)
-    trial.set_user_attr("profit_factor", summary["profit_factor"])
-    trial.set_user_attr("pct_winners_closed_early", summary["pct_winners_closed_early"])
-    trial.set_user_attr("total_trades", summary["total_trades"])
+    trial.set_user_attr("profit_factor", summary.profit_factor)
+    trial.set_user_attr("pct_winners_closed_early", summary.pct_winners_closed_early)
+    trial.set_user_attr("total_trades", summary.total_trades)
 
-    if summary["total_trades"] <= MIN_TRADES:
+    if summary.total_trades <= MIN_TRADES:
         raise optuna.exceptions.TrialPruned()
 
     score = (
