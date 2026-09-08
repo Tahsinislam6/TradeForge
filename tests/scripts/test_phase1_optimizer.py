@@ -245,8 +245,8 @@ def test_run_all_collects_completed_candidates(monkeypatch, capsys):
         BaselineCandidate(name="a", param_space=[IntParam(1, 10)], n_trials=1),
         BaselineCandidate(name="b", param_space=[IntParam(1, 10)], n_trials=1),
     ]
-    monkeypatch.setattr("scripts.phase1_optimizer.load_baseline_data", lambda currencies: {})
-    monkeypatch.setattr("scripts.phase1_optimizer.run_optimization", lambda *args, **kwargs: None)
+    monkeypatch.setattr("tradeforge.scripts.phase1_optimizer.load_baseline_data", lambda currencies: {})
+    monkeypatch.setattr("tradeforge.scripts.phase1_optimizer.run_optimization", lambda *args, **kwargs: None)
 
     run_all(currencies=["EURUSD"], candidates=candidates)
 
@@ -258,13 +258,13 @@ def test_run_all_failed_candidate_does_not_abort_the_batch(monkeypatch, capsys):
         BaselineCandidate(name="good", param_space=[IntParam(1, 10)], n_trials=1),
         BaselineCandidate(name="bad", param_space=[IntParam(1, 10)], n_trials=1),
     ]
-    monkeypatch.setattr("scripts.phase1_optimizer.load_baseline_data", lambda currencies: {})
+    monkeypatch.setattr("tradeforge.scripts.phase1_optimizer.load_baseline_data", lambda currencies: {})
 
     def fake_run_optimization(candidate, n_trials=None, currencies=None, cached_data=None, n_jobs=1):
         if candidate.name == "bad":
             raise RuntimeError("boom")
 
-    monkeypatch.setattr("scripts.phase1_optimizer.run_optimization", fake_run_optimization)
+    monkeypatch.setattr("tradeforge.scripts.phase1_optimizer.run_optimization", fake_run_optimization)
 
     run_all(currencies=["EURUSD"], candidates=candidates)
 
@@ -275,13 +275,13 @@ def test_run_all_failed_candidate_does_not_abort_the_batch(monkeypatch, capsys):
 
 
 def test_run_all_forwards_n_jobs_to_run_optimization(monkeypatch):
-    monkeypatch.setattr("scripts.phase1_optimizer.load_baseline_data", lambda currencies: {})
+    monkeypatch.setattr("tradeforge.scripts.phase1_optimizer.load_baseline_data", lambda currencies: {})
     captured = {}
 
     def fake_run_optimization(candidate, n_trials=None, currencies=None, cached_data=None, n_jobs=1):
         captured["n_jobs"] = n_jobs
 
-    monkeypatch.setattr("scripts.phase1_optimizer.run_optimization", fake_run_optimization)
+    monkeypatch.setattr("tradeforge.scripts.phase1_optimizer.run_optimization", fake_run_optimization)
     candidates = [BaselineCandidate(name="x", param_space=[IntParam(1, 10)], n_trials=1)]
 
     run_all(currencies=["EURUSD"], candidates=candidates, n_jobs=4)
@@ -293,8 +293,8 @@ def test_run_all_forwards_n_jobs_to_run_optimization(monkeypatch):
 
 def test_evaluate_trial_returns_metrics_when_request_succeeds(monkeypatch):
     expected = BaselineMetrics(whipsaw_frequency=1.0, avg_bars_held=10.0, distance_atr_ratio=1.5)
-    monkeypatch.setattr("scripts.phase1_optimizer.request_indicator", lambda *args, **kwargs: True)
-    monkeypatch.setattr("scripts.phase1_optimizer.baseline_backtest", lambda **kwargs: expected)
+    monkeypatch.setattr("tradeforge.scripts.phase1_optimizer.request_indicator", lambda *args, **kwargs: True)
+    monkeypatch.setattr("tradeforge.scripts.phase1_optimizer.baseline_backtest", lambda **kwargs: expected)
 
     result = evaluate_trial(
         parameters=[10], indicator_name="EMA", currencies=["EURUSD"], cached_data={}, trial_number=3,
@@ -304,7 +304,7 @@ def test_evaluate_trial_returns_metrics_when_request_succeeds(monkeypatch):
 
 
 def test_evaluate_trial_raises_when_request_fails(monkeypatch):
-    monkeypatch.setattr("scripts.phase1_optimizer.request_indicator", lambda *args, **kwargs: False)
+    monkeypatch.setattr("tradeforge.scripts.phase1_optimizer.request_indicator", lambda *args, **kwargs: False)
 
     with pytest.raises(RuntimeError, match="trial 3"):
         evaluate_trial(

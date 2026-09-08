@@ -27,7 +27,7 @@ def _indicator(name="Baseline", col_names=("Baseline_Buffer_0",), num_buffers=1)
 # request_and_load_many
 
 def test_request_and_load_many_raises_when_request_fails(monkeypatch):
-    monkeypatch.setattr("scripts.run_backtest.request_indicator", lambda *a, **k: False)
+    monkeypatch.setattr("tradeforge.scripts.run_backtest.request_indicator", lambda *a, **k: False)
 
     with pytest.raises(RuntimeError, match="EMA"):
         request_and_load_many(["EURUSD_SB"], _indicator(name="EMA"), trial=0)
@@ -35,7 +35,7 @@ def test_request_and_load_many_raises_when_request_fails(monkeypatch):
 
 def test_request_and_load_many_raises_when_file_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(Config, "COMMON_DIR", str(tmp_path))
-    monkeypatch.setattr("scripts.run_backtest.request_indicator", lambda *a, **k: True)
+    monkeypatch.setattr("tradeforge.scripts.run_backtest.request_indicator", lambda *a, **k: True)
 
     with pytest.raises(FileNotFoundError):
         request_and_load_many(["EURUSD_SB"], _indicator(name="EMA"), trial=0)
@@ -43,7 +43,7 @@ def test_request_and_load_many_raises_when_file_missing(tmp_path, monkeypatch):
 
 def test_request_and_load_many_loads_and_renames_each_currency(tmp_path, monkeypatch):
     monkeypatch.setattr(Config, "COMMON_DIR", str(tmp_path))
-    monkeypatch.setattr("scripts.run_backtest.request_indicator", lambda *a, **k: True)
+    monkeypatch.setattr("tradeforge.scripts.run_backtest.request_indicator", lambda *a, **k: True)
     for currency in ["EURUSD_SB", "GBPUSD_SB"]:
         pd.DataFrame({"DateTime": [1, 2], "Buffer_Value_0": [1.0, 2.0]}).to_csv(
             tmp_path / f"{currency}_EMA_1440_0.csv", index=False
@@ -72,7 +72,7 @@ def test_load_currency_data_skips_request_when_baseline_already_cached(monkeypat
     }
     called = []
     monkeypatch.setattr(
-        "scripts.run_backtest.request_and_load_many",
+        "tradeforge.scripts.run_backtest.request_and_load_many",
         lambda *a, **k: called.append(1) or {},
     )
 
@@ -91,7 +91,7 @@ def test_load_currency_data_requests_and_merges_baseline_when_not_cached(monkeyp
     cached_data = {"EURUSD_SB": _ohlc_df(["2024.01.01 00:00", "2024.01.01 00:05"])}
     baseline_df = pd.DataFrame({"DateTime": ["2024.01.01 00:00", "2024.01.01 00:05"], "Baseline_Buffer_0": [1.5, 1.6]})
     monkeypatch.setattr(
-        "scripts.run_backtest.request_and_load_many",
+        "tradeforge.scripts.run_backtest.request_and_load_many",
         lambda currencies, indicator, trial: {"EURUSD_SB": baseline_df},
     )
 
@@ -114,7 +114,7 @@ def test_load_currency_data_with_c1_requests_both_indicators_and_extends_kwargs(
         requested_for.append(indicator.name)
         return {"EURUSD_SB": pd.DataFrame({"DateTime": ["2024.01.01 00:00"], "C1_Buffer_0": [0.5]})}
 
-    monkeypatch.setattr("scripts.run_backtest.request_and_load_many", fake_request)
+    monkeypatch.setattr("tradeforge.scripts.run_backtest.request_and_load_many", fake_request)
 
     indicator_cols, strategy_kwargs, dfs_by_currency = _load_currency_data(
         ["EURUSD_SB"], baseline, c1, trial=0, cached_data=cached_data, print_results=False,
@@ -140,7 +140,7 @@ def test_load_currency_data_skips_request_when_c1_already_cached(monkeypatch):
     }
     called = []
     monkeypatch.setattr(
-        "scripts.run_backtest.request_and_load_many",
+        "tradeforge.scripts.run_backtest.request_and_load_many",
         lambda *a, **k: called.append(1) or {},
     )
 
@@ -168,7 +168,7 @@ def test_load_currency_data_with_exit_indicator_requests_it_and_extends_kwargs(m
         requested_for.append(indicator.name)
         return {"EURUSD_SB": pd.DataFrame({"DateTime": ["2024.01.01 00:00"], "Exit_Buffer_0": [0.3]})}
 
-    monkeypatch.setattr("scripts.run_backtest.request_and_load_many", fake_request)
+    monkeypatch.setattr("tradeforge.scripts.run_backtest.request_and_load_many", fake_request)
 
     indicator_cols, strategy_kwargs, dfs_by_currency = _load_currency_data(
         ["EURUSD_SB"], baseline, c1, trial=0, cached_data=cached_data, print_results=False,
@@ -398,12 +398,12 @@ def test_run_backtest_wires_helpers_and_returns_build_summary_result(monkeypatch
         calls["summary"] = (strat, cerebro, baseline, initial_cash, currencies)
         return sentinel_summary
 
-    monkeypatch.setattr("scripts.run_backtest._load_currency_data", fake_load)
-    monkeypatch.setattr("scripts.run_backtest._run_cerebro", fake_run_cerebro)
-    monkeypatch.setattr("scripts.run_backtest._build_summary", fake_build_summary)
+    monkeypatch.setattr("tradeforge.scripts.run_backtest._load_currency_data", fake_load)
+    monkeypatch.setattr("tradeforge.scripts.run_backtest._run_cerebro", fake_run_cerebro)
+    monkeypatch.setattr("tradeforge.scripts.run_backtest._build_summary", fake_build_summary)
 
     baseline = SimpleNamespace(name="Baseline")
-    result = run_backtest(["EURUSD_SB"], baseline, trial=2, initial_cash=5_000.0, print_results=False)
+    result = run_backtest(baseline, currencies=["EURUSD_SB"], trial=2, initial_cash=5_000.0, print_results=False)
 
     assert result is sentinel_summary
     assert calls["load"] == (["EURUSD_SB"], baseline, None, 2, None, False, None)
@@ -415,15 +415,15 @@ def test_run_backtest_wires_helpers_and_returns_build_summary_result(monkeypatch
 def test_run_backtest_forwards_exit_indicator_to_load_currency_data(monkeypatch):
     calls = {}
     monkeypatch.setattr(
-        "scripts.run_backtest._load_currency_data",
+        "tradeforge.scripts.run_backtest._load_currency_data",
         lambda currencies, baseline, c1, trial, cached_data, print_results, exit_indicator=None:
             calls.update(exit_indicator=exit_indicator) or ([], {}, {}),
     )
-    monkeypatch.setattr("scripts.run_backtest._run_cerebro", lambda *a, **k: ("cerebro-obj", "strat-obj"))
-    monkeypatch.setattr("scripts.run_backtest._build_summary", lambda *a, **k: {})
+    monkeypatch.setattr("tradeforge.scripts.run_backtest._run_cerebro", lambda *a, **k: ("cerebro-obj", "strat-obj"))
+    monkeypatch.setattr("tradeforge.scripts.run_backtest._build_summary", lambda *a, **k: {})
 
     exit_indicator = SimpleNamespace(name="Exit")
-    run_backtest(["EURUSD_SB"], SimpleNamespace(name="Baseline"), exit_indicator=exit_indicator, print_results=False)
+    run_backtest(SimpleNamespace(name="Baseline"), currencies=["EURUSD_SB"], exit_indicator=exit_indicator, print_results=False)
 
     assert calls["exit_indicator"] is exit_indicator
 
