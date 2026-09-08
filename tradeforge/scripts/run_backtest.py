@@ -2,6 +2,7 @@
 
 import os
 import time
+from dataclasses import dataclass, field
 
 import backtrader as bt
 
@@ -135,39 +136,67 @@ def _run_cerebro(currencies, dfs_by_currency, indicator_cols, strategy, strategy
     return cerebro, strat
 
 
-def _build_summary(strat, cerebro, baseline: Indicator, initial_cash: float) -> dict:
+@dataclass
+class BacktestSummary:
+    """Results from one run_backtest call -- one Cerebro run over one or
+    more currencies sharing a single portfolio equity/risk budget."""
+    currencies: list[str]
+    baseline: str
+    initial_cash: float
+    final_value: float
+    net_pnl: float
+    return_pct: float
+    sharpe: float | None
+    max_drawdown: float
+    total_trades: int
+    won: int
+    lost: int
+    win_rate: float
+    profit_factor: float
+    avg_bars_held: float
+    min_bars_held: int
+    max_bars_held: int
+    gross_profit: float
+    gross_loss: float
+    avg_win: float
+    avg_loss: float
+    pct_winners_closed_early: float = 0.0
+    avg_loss_by_reason: dict = field(default_factory=dict)
+
+
+def _build_summary(strat, cerebro, baseline: Indicator, initial_cash: float, currencies: list[str]) -> BacktestSummary:
     final_value = cerebro.broker.getvalue()
     paired      = strat.analyzers.paired.get_analysis()
     won         = paired["won"]
     lost        = paired["lost"]
 
-    return {
-        "baseline":      baseline.name,
-        "initial_cash":  initial_cash,
-        "final_value":   final_value,
-        "net_pnl":       final_value - initial_cash,
-        "return_pct":    strat.analyzers.returns.get_analysis().get("rtot", 0.0) * 100,
-        "sharpe":        strat.analyzers.sharpe.get_analysis().get("sharperatio"),
-        "max_drawdown":  strat.analyzers.drawdown.get_analysis().get("max", {}).get("drawdown", 0.0),
-        "total_trades":  paired["total"],
-        "won":           won,
-        "lost":          lost,
-        "win_rate":      paired["win_rate"],
-        "profit_factor": paired["profit_factor"],
-        "avg_bars_held": paired["avg_bars_held"],
-        "min_bars_held": paired["min_bars_held"],
-        "max_bars_held": paired["max_bars_held"],
-        "gross_profit":  paired["gross_profit"],
-        "gross_loss":    paired["gross_loss"],
-        "avg_win":       (paired["gross_profit"] / won) if won else 0.0,
-        "avg_loss":      (paired["gross_loss"] / lost) if lost else 0.0,
-        "pct_winners_closed_early": paired.get("pct_winners_closed_early", 0.0),
-        "avg_loss_by_reason":       paired.get("avg_loss_by_reason", {}),
-    }
+    return BacktestSummary(
+        currencies=currencies,
+        baseline=baseline.name,
+        initial_cash=initial_cash,
+        final_value=final_value,
+        net_pnl=final_value - initial_cash,
+        return_pct=strat.analyzers.returns.get_analysis().get("rtot", 0.0) * 100,
+        sharpe=strat.analyzers.sharpe.get_analysis().get("sharperatio"),
+        max_drawdown=strat.analyzers.drawdown.get_analysis().get("max", {}).get("drawdown", 0.0),
+        total_trades=paired["total"],
+        won=won,
+        lost=lost,
+        win_rate=paired["win_rate"],
+        profit_factor=paired["profit_factor"],
+        avg_bars_held=paired["avg_bars_held"],
+        min_bars_held=paired["min_bars_held"],
+        max_bars_held=paired["max_bars_held"],
+        gross_profit=paired["gross_profit"],
+        gross_loss=paired["gross_loss"],
+        avg_win=(paired["gross_profit"] / won) if won else 0.0,
+        avg_loss=(paired["gross_loss"] / lost) if lost else 0.0,
+        pct_winners_closed_early=paired.get("pct_winners_closed_early", 0.0),
+        avg_loss_by_reason=paired.get("avg_loss_by_reason", {}),
+    )
 
 
 def run_backtest(
-    currencies: list[str],
     baseline: Indicator,
     c1: Indicator | None = None,
     strategy=Phase1Strategy,
@@ -178,7 +207,8 @@ def run_backtest(
     print_results: bool = True,
     log_timing: bool = False,
     exit_indicator: Indicator | None = None,
-) -> dict:
+    currencies: list[str] = None,
+) -> BacktestSummary:
     """Backtest a baseline (+ optional C1) (+ optional exit indicator)
     strategy on one or more currency pairs in a single Cerebro run, sharing
     one portfolio equity/risk budget.
@@ -196,6 +226,9 @@ def run_backtest(
             with strategy=Phase5Strategy -- ignored (and simply never
             requested/merged) otherwise.
     """
+    if not currencies:
+        currencies = Config.IN_SAMPLE
+
     t0 = time.perf_counter()
     indicator_cols, strategy_kwargs, dfs_by_currency = _load_currency_data(
         currencies, baseline, c1, trial, cached_data, print_results, exit_indicator=exit_indicator,
@@ -206,77 +239,30 @@ def run_backtest(
     if log_timing:
         print(f"[timing]   data_load={t1 - t0:.3f}s  backtest={t2 - t1:.3f}s  total={t2 - t0:.3f}s")
     del dfs_by_currency
-    summary = _build_summary(strat, cerebro, baseline, initial_cash)
+    summary = _build_summary(strat, cerebro, baseline, initial_cash, currencies)
     del cerebro, strat
-    return {"currencies": currencies, **summary}
+    return summary
 
 
-def print_summary(summary: dict):
+def print_summary(summary: BacktestSummary):
     print_header("BACKTEST RESULTS")
-    print(f"  Currencies: {', '.join(summary['currencies'])}")
-    print(f"  Baseline  : {summary['baseline']}")
+    print(f"  Currencies: {', '.join(summary.currencies)}")
+    print(f"  Baseline  : {summary.baseline}")
     print()
-    print(f"  Initial   : ${summary['initial_cash']:,.2f}")
-    print(f"  Final     : ${summary['final_value']:,.2f}")
-    print(f"  Net P&L   : ${summary['net_pnl']:,.2f}  ({summary['return_pct']:.2f}%)")
-    sharpe = summary["sharpe"]
+    print(f"  Initial   : ${summary.initial_cash:,.2f}")
+    print(f"  Final     : ${summary.final_value:,.2f}")
+    print(f"  Net P&L   : ${summary.net_pnl:,.2f}  ({summary.return_pct:.2f}%)")
+    sharpe = summary.sharpe
     print(f"  Sharpe    : {sharpe:.3f}" if sharpe else "  Sharpe    : N/A")
-    print(f"  Max DD    : {summary['max_drawdown']:.2f}%")
+    print(f"  Max DD    : {summary.max_drawdown:.2f}%")
     print()
-    print(f"  Trades    : {summary['total_trades']}  (W {summary['won']} / L {summary['lost']})")
-    print(f"  Win Rate  : {summary['win_rate']:.1f}%")
-    pf = summary["profit_factor"]
+    print(f"  Trades    : {summary.total_trades}  (W {summary.won} / L {summary.lost})")
+    print(f"  Win Rate  : {summary.win_rate:.1f}%")
+    pf = summary.profit_factor
     print(f"  PF        : {pf:.2f}" if pf != float("inf") else "  PF        : inf")
-    avg = summary["avg_bars_held"]
+    avg = summary.avg_bars_held
     if avg:
-        print(f"  Bars Held : avg {avg:.1f}  min {summary['min_bars_held']}  max {summary['max_bars_held']}")
+        print(f"  Bars Held : avg {avg:.1f}  min {summary.min_bars_held}  max {summary.max_bars_held}")
     print()
 
-
-if __name__ == "__main__":
-    # python -m scripts.run_backtest
-    # Phase 1 — baseline only
-    # summary = run_backtest(
-    #     currencies=["EURUSD_SB"],
-    #     baseline=PriceCrossIndicator(name="SineWMA", parameters=[77, 5], buffer_values=[0], label="Baseline"),
-    #     strategy=Phase1Strategy,
-    #     plot=False,
-    # )
-
-    # Phase 2 — baseline + C1
-
-    summary = run_backtest(
-        currencies=Config.IN_SAMPLE,
-        baseline=PriceCrossIndicator(name="mcginley", parameters=[29, 1, 11, 1], buffer_values=[0], label="Baseline"),
-        c1=LineCrossIndicator(name="Fisher", parameters=[21, 0.4, 0.8], buffer_values=[0], label="C1", reverse=False),
-        strategy=Phase2Strategy,
-        plot=False,
-    )
-    print_summary(summary)
-
-
-    # Phase 2 — portfolio backtest with multiple currencies
-    # summary = run_backtest(
-    #     currencies=Config.OUT_OF_SAMPLE,
-    #     # currencies=["AUDNZD_SB"],
-    #     baseline=PriceCrossIndicator(name="mcginley", parameters=[49, 3, 9, 0], buffer_values=[0], label="Baseline"),
-    #     c1=TwoLineCrossIndicator(name="TOPTREND", parameters=[4,8,1, 2, 1, 3000, 0], buffer_values=[2,3], label="C1", reverse=False),
-    #     strategy=Phase2Strategy,
-    #     plot=False,
-    # )
-    # print_summary(summary)
-
-    # Reproduce the phase2_optimizer SuperTrend sweep at full portfolio scale
-    # (Config.IN_SAMPLE, 10 currencies -- the default when --only is passed
-    # without a positional currency) to profile the order/broker overhead at
-    # the same scale where backtest time was 2.3-3s/trial.
-    # summary = run_backtest(
-    #     currencies=Config.IN_SAMPLE,
-    #     baseline=PriceCrossIndicator(name="mcginley", parameters=[29, 1, 11, 1], buffer_values=[0], label="Baseline"),
-    #     c1=TwoLineCrossIndicator(name="SuperTrend", parameters=[116, 3], buffer_values=[1, 0], label="C1", reverse=False),
-    #     strategy=Phase2Strategy,
-    #     plot=False,
-    #     log_timing=True,
-    # )
-    # print_summary(summary)
 

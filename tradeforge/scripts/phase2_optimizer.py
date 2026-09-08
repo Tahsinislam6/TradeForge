@@ -7,10 +7,11 @@ from pathlib import Path
 import optuna
 from functools import partial
 
-from scripts.run_backtest import run_backtest, request_and_load_many
+from tradeforge.scripts.run_backtest import run_backtest, request_and_load_many
 from tradeforge.backtest.algorithm import Phase2Strategy
 from tradeforge.backtest.candidates.c1_candidates import C1_CANDIDATES
 from tradeforge.backtest.candidates.candidate_types import C1Candidate
+from tradeforge.backtest.candidates.bt_candidate_config import Bt_Config
 from tradeforge.backtest.candidates.param_space import build_sampler, fixed_values, grid_trial_count, max_warmup_bars, suggest_params
 from tradeforge.backtest.config import *
 from tradeforge.backtest.optuna_journal import (
@@ -38,11 +39,6 @@ MAX_DRAWDOWN = 60.0
 # C1 sweep, which cleared every other constraint (trades/win_rate/bars
 # held/drawdown) while still being net-losing on profit_factor.
 MIN_PROFIT_FACTOR = 0.9
-
-# ===== Parameters (edit these) =====
-# Fixed, already Phase-1-optimized baseline
-BASELINE = PriceCrossIndicator(name="Baseline", parameters=[32,2.6,18], buffer_values=[0], label="Baseline")
-
 
 def get_constraint_violations(trial, min_trades: int, min_win_rate: float, min_avg_bars_held: float, max_drawdown: float, min_profit_factor: float):
     """Penalize trials with too few trades, low win rate, low average bars
@@ -109,17 +105,17 @@ def objective(trial: optuna.Trial, currencies: list[str], baseline: Indicator, c
         # pile up in Config.COMMON_DIR across a whole grid sweep.
         clear_external_files(Config.COMMON_DIR, f"*_{trial.number}.csv")
 
-    trial.set_user_attr("total_trades", summary["total_trades"])
-    trial.set_user_attr("win_rate", summary["win_rate"])
-    trial.set_user_attr("avg_bars_held", summary["avg_bars_held"])
-    trial.set_user_attr("max_drawdown", summary["max_drawdown"])
-    trial.set_user_attr("profit_factor", summary["profit_factor"])
-    trial.set_user_attr("avg_loss", summary["avg_loss"])
+    trial.set_user_attr("total_trades", summary.total_trades)
+    trial.set_user_attr("win_rate", summary.win_rate)
+    trial.set_user_attr("avg_bars_held", summary.avg_bars_held)
+    trial.set_user_attr("max_drawdown", summary.max_drawdown)
+    trial.set_user_attr("profit_factor", summary.profit_factor)
+    trial.set_user_attr("avg_loss", summary.avg_loss)
 
-    total_trades = summary["total_trades"]
-    win_rate = summary["win_rate"]
-    avg_bars_held = summary["avg_bars_held"]
-    profit_factor = summary["profit_factor"]
+    total_trades = summary.total_trades
+    win_rate = summary.win_rate
+    avg_bars_held = summary.avg_bars_held
+    profit_factor = summary.profit_factor
 
     if total_trades <= MIN_TRADES:
         raise optuna.exceptions.TrialPruned()
@@ -413,36 +409,13 @@ def run_all(
     send_notification("Phase 2 complete")
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run NSGA-II Phase 2 (C1) optimisation against a fixed baseline.")
-    parser.add_argument("currency", type=str, nargs="?", default=None,
-                         help="Currency pair (e.g. EURUSD_SB). Defaults to a single portfolio "
-                              "optimization across every currency in Config.CURRENCIES.")
-    parser.add_argument("--trials", type=int, default=None,
-                         help="Default number of Optuna trials, used for any C1_CANDIDATES "
-                              "entry that doesn't set its own n_trials. Not required if "
-                              "every candidate being run sets its own n_trials or uses "
-                              "sampler='grid' (which derives its own trial count).")
-    parser.add_argument("--only", type=str, default=None,
-                         help="Only test the C1_CANDIDATES entry with this name "
-                              "(case-insensitive), instead of sweeping the whole list.")
-    parser.add_argument("--log-timing", action="store_true",
-                         help="Print per-trial data_load/backtest timing breakdown. "
-                              "Intended for a short diagnostic run (small --trials), not routine sweeps.")
-    parser.add_argument("--workers", type=int, default=1,
-                         help="Number of worker processes to split each candidate's trials "
-                              "across. Workers coordinate through the shared JournalStorage "
-                              "log, so this is safe to raise up to roughly your CPU core "
-                              "count. Default 1 (sequential, same as before this flag existed).")
-    args = parser.parse_args()
-
-    currencies = [args.currency] if args.currency else Config.IN_SAMPLE
+def run_p2_optimizer(trials: int=None, currencies=None, only: str=None, workers: int=1, log_timing: bool=None):
+    if not currencies:
+        currencies = Config.IN_SAMPLE
 
     candidates = C1_CANDIDATES
-    if args.only:
-        candidates = [c for c in C1_CANDIDATES if c.name.lower() == args.only.lower()]
+    if only:
+        candidates = [c for c in C1_CANDIDATES if c.name.lower() == only.lower()]
         if not candidates:
-            available = ", ".join(c.name for c in C1_CANDIDATES)
-            raise SystemExit(f"No C1_CANDIDATES entry named '{args.only}'. Available: {available}")
-
-    run_all(currencies=currencies, baseline=BASELINE, n_trials=args.trials, candidates=candidates, log_timing=args.log_timing, n_jobs=args.workers)
+            raise SystemExit(f"No CANDIDATES entry named '{only}'")
+    run_all(currencies=currencies, baseline=Bt_Config.BASELINE, n_trials=trials, candidates=candidates, log_timing=log_timing, n_jobs=workers)

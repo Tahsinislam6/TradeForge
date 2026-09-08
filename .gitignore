@@ -15,7 +15,6 @@ venv/
 *.env
 *.ps1
 tradeforge/backtest/candidates/*
-scratch_whipsaw_analysis/
 # Allowed files
 !tradeforge/backtest/candidates/param_space.py
 !tradeforge/backtest/candidates/candidate_types.py
