@@ -38,6 +38,7 @@ class NNFXBaseStrategy(bt.Strategy):
     SL_MULTIPLIER    = 1.5
     RISK_PCT         = 0.02
     TRADE2_SIZE_PCT  = 0.5
+    BASELINE_ENTRY_ATR_MULTIPLIER = 1.0
 
     params = dict(
         baseline=None,
@@ -71,6 +72,17 @@ class NNFXBaseStrategy(bt.Strategy):
 
     def _any_trigger(self, data) -> bool:
         return any(ind.crossed(data) for ind in self._trigger_indicators)
+
+    def _price_within_atr_of_baseline(self, data) -> bool:
+        """Standard Entry / Baseline Cross Entry both require price to be
+        within 1x ATR of Baseline at entry time (NNFX flow chart) -- beyond
+        that is "a bridge too far" and calls for a Pull Back Entry instead,
+        which this strategy doesn't implement, so such bars simply enter
+        nothing."""
+        state = self._state[id(data)]
+        baseline_value = self.p.baseline.line(data)[0]
+        distance = abs(data.close[0] - baseline_value)
+        return distance <= state.atr[0] * self.BASELINE_ENTRY_ATR_MULTIPLIER
 
     def _get_directions(self, data) -> list[Signal]:
         return [ind.direction(data) for ind in self._indicators]
@@ -246,7 +258,8 @@ class NNFXBaseStrategy(bt.Strategy):
             if position.size < 0:
                 self._cancel_all(data)
                 self.close(data=data)
-            self._enter_long(data)
+            if self._price_within_atr_of_baseline(data):
+                self._enter_long(data)
 
         elif all_short:
             if position.size < 0:
@@ -254,7 +267,8 @@ class NNFXBaseStrategy(bt.Strategy):
             if position.size > 0:
                 self._cancel_all(data)
                 self.close(data=data)
-            self._enter_short(data)
+            if self._price_within_atr_of_baseline(data):
+                self._enter_short(data)
 
 
 # Phase 1 — Baseline only

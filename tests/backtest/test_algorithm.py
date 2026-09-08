@@ -366,6 +366,36 @@ def test_get_directions_returns_one_per_indicator():
     assert strategy._get_directions(data) == [Signal.LONG, Signal.SHORT]
 
 
+# _price_within_atr_of_baseline
+
+def _strategy_for_atr_distance(close, baseline_value, atr_value):
+    strategy = _new_strategy()
+    data = _data(close=close)
+    baseline = _FakeIndicator()
+    baseline.set_for(data, line_value=baseline_value)
+    strategy.p = SimpleNamespace(baseline=baseline)
+    strategy._state = {id(data): _TwoTradeDataState(atr=[atr_value])}
+    return strategy, data
+
+
+def test_price_within_atr_of_baseline_true_when_equal():
+    strategy, data = _strategy_for_atr_distance(close=100.0, baseline_value=99.0, atr_value=1.0)
+
+    assert strategy._price_within_atr_of_baseline(data) is True
+
+
+def test_price_within_atr_of_baseline_false_when_beyond():
+    strategy, data = _strategy_for_atr_distance(close=100.0, baseline_value=98.9, atr_value=1.0)
+
+    assert strategy._price_within_atr_of_baseline(data) is False
+
+
+def test_price_within_atr_of_baseline_symmetric_for_price_below_baseline():
+    strategy, data = _strategy_for_atr_distance(close=100.0, baseline_value=101.0, atr_value=1.0)
+
+    assert strategy._price_within_atr_of_baseline(data) is True
+
+
 # _enter_long / _enter_short
 
 def test_enter_long_submits_both_trades_when_size2_positive():
@@ -469,7 +499,7 @@ def test_enter_short_submits_nothing_when_size1_is_zero():
 
 # _process_data
 
-def _ready_strategy(line_value=1.0, atr_value=1.0, crossed=True, direction=Signal.LONG):
+def _ready_strategy(line_value=100.0, atr_value=1.0, crossed=True, direction=Signal.LONG):
     strategy = _new_strategy()
     data = _data()
     baseline = _FakeIndicator()
@@ -599,6 +629,51 @@ def test_process_data_reverses_long_position_to_short():
     strategy._process_data(data)
 
     assert recorded == [("cancel_all", data), ("close", data), ("enter_short", data)]
+
+
+# Standard/Baseline Entry "price within 1x ATR of Baseline" filter
+
+def test_process_data_skips_entry_when_price_beyond_atr_of_baseline_long():
+    """Price 100, baseline 90, ATR 1 -> 10 ATRs away: beyond the NNFX
+    Standard/Baseline Entry filter, so no entry even though all indicators
+    agree long."""
+    strategy, data, recorded = _ready_strategy(direction=Signal.LONG, line_value=90.0, atr_value=1.0)
+    strategy.getposition = lambda d: SimpleNamespace(size=0)
+
+    strategy._process_data(data)
+
+    assert recorded == []
+
+
+def test_process_data_skips_entry_when_price_beyond_atr_of_baseline_short():
+    strategy, data, recorded = _ready_strategy(direction=Signal.SHORT, line_value=110.0, atr_value=1.0)
+    strategy.getposition = lambda d: SimpleNamespace(size=0)
+
+    strategy._process_data(data)
+
+    assert recorded == []
+
+
+def test_process_data_enters_when_price_exactly_at_atr_boundary():
+    """"Within 1x ATR" is inclusive of the boundary itself."""
+    strategy, data, recorded = _ready_strategy(direction=Signal.LONG, line_value=99.0, atr_value=1.0)
+    strategy.getposition = lambda d: SimpleNamespace(size=0)
+
+    strategy._process_data(data)
+
+    assert recorded == [("enter_long", data)]
+
+
+def test_process_data_reversal_still_closes_when_entry_filtered_by_atr_distance():
+    """The ATR-distance filter gates the new entry, not the defensive close
+    of an opposing position -- flow-chart exits (flip of C1/baseline) aren't
+    conditioned on this filter."""
+    strategy, data, recorded = _ready_strategy(direction=Signal.LONG, line_value=90.0, atr_value=1.0)
+    strategy.getposition = lambda d: SimpleNamespace(size=-5)
+
+    strategy._process_data(data)
+
+    assert recorded == [("cancel_all", data), ("close", data)]
 
 
 def test_process_data_already_short_all_short_is_a_noop():
