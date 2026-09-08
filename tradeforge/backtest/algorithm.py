@@ -52,7 +52,16 @@ class NNFXBaseStrategy(bt.Strategy):
     )
 
     def __init__(self):
+        # _indicators: every indicator that must agree on direction before
+        # an entry is allowed (the unanimity check in _process_data).
+        # _trigger_indicators: the subset of those whose *own* cross event
+        # is allowed to be the thing that fires entry (NNFX's Standard Entry
+        # / Baseline Entry -- "C1 gives signal" or "Baseline gives signal").
+        # A confirmation-only indicator like C2 belongs in _indicators but
+        # never in _trigger_indicators: it can agree or disagree, but per
+        # the NNFX flow chart it never itself starts a trade.
         self._indicators: list[Indicator] = [self.p.baseline]
+        self._trigger_indicators: list[Indicator] = [self.p.baseline]
         self._state: dict[int, _DataState] = {}
         self.p.baseline.reset()
         for data in self.datas:
@@ -61,7 +70,7 @@ class NNFXBaseStrategy(bt.Strategy):
             self._state[id(data)] = _TwoTradeDataState(atr)
 
     def _any_trigger(self, data) -> bool:
-        return any(ind.crossed(data) for ind in self._indicators)
+        return any(ind.crossed(data) for ind in self._trigger_indicators)
 
     def _get_directions(self, data) -> list[Signal]:
         return [ind.direction(data) for ind in self._indicators]
@@ -266,6 +275,32 @@ class Phase2Strategy(NNFXBaseStrategy):
         for data in self.datas:
             self.p.c1.setup(self, data, plot=self.p.plot_indicators)
         self._indicators.append(self.p.c1)
+        # C1's own cross is a valid entry trigger (NNFX's Standard Entry),
+        # same as Baseline's (Baseline Entry) -- see NNFXBaseStrategy.__init__.
+        self._trigger_indicators.append(self.p.c1)
+
+
+# Phase 3 — Baseline + C1 + secondary confirmation (C2)
+#
+# C2 is a confirmation-only indicator: appended to self._indicators (so
+# NNFXBaseStrategy._process_data's all_long/all_short unanimity check --
+# see _any_trigger/_get_directions -- requires baseline+C1+C2 to all agree
+# before entering, and a C1 signal C2 doesn't corroborate never satisfies
+# all_long/all_short), but deliberately left out of self._trigger_indicators.
+# Per the NNFX flow chart, only Baseline or C1 giving a fresh signal may
+# trigger an entry (Standard Entry / Baseline Entry) -- C2 only ever
+# "Agrees" or disagrees, so its own cross must never be what fires a trade.
+
+class Phase3Strategy(Phase2Strategy):
+
+    params = dict(c2=None)
+
+    def __init__(self):
+        super().__init__()
+        self.p.c2.reset()
+        for data in self.datas:
+            self.p.c2.setup(self, data, plot=self.p.plot_indicators)
+        self._indicators.append(self.p.c2)
 
 
 # Phase 5 — Baseline + C1 + independent exit indicator
