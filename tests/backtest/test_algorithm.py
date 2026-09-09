@@ -7,6 +7,7 @@ from tradeforge.backtest.algorithm import (
     NNFXBaseStrategy,
     Phase1Strategy,
     Phase2Strategy,
+    Phase3Strategy,
     Phase5Strategy,
     _TwoTradeDataState,
 )
@@ -338,7 +339,7 @@ def test_any_trigger_true_when_any_indicator_crossed():
     ind1, ind2 = _FakeIndicator(), _FakeIndicator()
     ind1.set_for(data, crossed=False)
     ind2.set_for(data, crossed=True)
-    strategy._indicators = [ind1, ind2]
+    strategy._trigger_indicators = [ind1, ind2]
 
     assert strategy._any_trigger(data) is True
 
@@ -349,7 +350,7 @@ def test_any_trigger_false_when_none_crossed():
     ind1, ind2 = _FakeIndicator(), _FakeIndicator()
     ind1.set_for(data, crossed=False)
     ind2.set_for(data, crossed=False)
-    strategy._indicators = [ind1, ind2]
+    strategy._trigger_indicators = [ind1, ind2]
 
     assert strategy._any_trigger(data) is False
 
@@ -363,6 +364,36 @@ def test_get_directions_returns_one_per_indicator():
     strategy._indicators = [ind1, ind2]
 
     assert strategy._get_directions(data) == [Signal.LONG, Signal.SHORT]
+
+
+# _price_within_atr_of_baseline
+
+def _strategy_for_atr_distance(close, baseline_value, atr_value):
+    strategy = _new_strategy()
+    data = _data(close=close)
+    baseline = _FakeIndicator()
+    baseline.set_for(data, line_value=baseline_value)
+    strategy.p = SimpleNamespace(baseline=baseline)
+    strategy._state = {id(data): _TwoTradeDataState(atr=[atr_value])}
+    return strategy, data
+
+
+def test_price_within_atr_of_baseline_true_when_equal():
+    strategy, data = _strategy_for_atr_distance(close=100.0, baseline_value=99.0, atr_value=1.0)
+
+    assert strategy._price_within_atr_of_baseline(data) is True
+
+
+def test_price_within_atr_of_baseline_false_when_beyond():
+    strategy, data = _strategy_for_atr_distance(close=100.0, baseline_value=98.9, atr_value=1.0)
+
+    assert strategy._price_within_atr_of_baseline(data) is False
+
+
+def test_price_within_atr_of_baseline_symmetric_for_price_below_baseline():
+    strategy, data = _strategy_for_atr_distance(close=100.0, baseline_value=101.0, atr_value=1.0)
+
+    assert strategy._price_within_atr_of_baseline(data) is True
 
 
 # _enter_long / _enter_short
@@ -468,12 +499,13 @@ def test_enter_short_submits_nothing_when_size1_is_zero():
 
 # _process_data
 
-def _ready_strategy(line_value=1.0, atr_value=1.0, crossed=True, direction=Signal.LONG):
+def _ready_strategy(line_value=100.0, atr_value=1.0, crossed=True, direction=Signal.LONG):
     strategy = _new_strategy()
     data = _data()
     baseline = _FakeIndicator()
     baseline.set_for(data, crossed=crossed, direction=direction, line_value=line_value)
     strategy._indicators = [baseline]
+    strategy._trigger_indicators = [baseline]
     strategy.p = SimpleNamespace(baseline=baseline)
     strategy._state = {id(data): _TwoTradeDataState(atr=[atr_value])}
     recorded = []
@@ -599,6 +631,51 @@ def test_process_data_reverses_long_position_to_short():
     assert recorded == [("cancel_all", data), ("close", data), ("enter_short", data)]
 
 
+# Standard/Baseline Entry "price within 1x ATR of Baseline" filter
+
+def test_process_data_skips_entry_when_price_beyond_atr_of_baseline_long():
+    """Price 100, baseline 90, ATR 1 -> 10 ATRs away: beyond the NNFX
+    Standard/Baseline Entry filter, so no entry even though all indicators
+    agree long."""
+    strategy, data, recorded = _ready_strategy(direction=Signal.LONG, line_value=90.0, atr_value=1.0)
+    strategy.getposition = lambda d: SimpleNamespace(size=0)
+
+    strategy._process_data(data)
+
+    assert recorded == []
+
+
+def test_process_data_skips_entry_when_price_beyond_atr_of_baseline_short():
+    strategy, data, recorded = _ready_strategy(direction=Signal.SHORT, line_value=110.0, atr_value=1.0)
+    strategy.getposition = lambda d: SimpleNamespace(size=0)
+
+    strategy._process_data(data)
+
+    assert recorded == []
+
+
+def test_process_data_enters_when_price_exactly_at_atr_boundary():
+    """"Within 1x ATR" is inclusive of the boundary itself."""
+    strategy, data, recorded = _ready_strategy(direction=Signal.LONG, line_value=99.0, atr_value=1.0)
+    strategy.getposition = lambda d: SimpleNamespace(size=0)
+
+    strategy._process_data(data)
+
+    assert recorded == [("enter_long", data)]
+
+
+def test_process_data_reversal_still_closes_when_entry_filtered_by_atr_distance():
+    """The ATR-distance filter gates the new entry, not the defensive close
+    of an opposing position -- flow-chart exits (flip of C1/baseline) aren't
+    conditioned on this filter."""
+    strategy, data, recorded = _ready_strategy(direction=Signal.LONG, line_value=90.0, atr_value=1.0)
+    strategy.getposition = lambda d: SimpleNamespace(size=-5)
+
+    strategy._process_data(data)
+
+    assert recorded == [("cancel_all", data), ("close", data)]
+
+
 def test_process_data_already_short_all_short_is_a_noop():
     strategy, data, recorded = _ready_strategy(direction=Signal.SHORT)
     strategy.getposition = lambda d: SimpleNamespace(size=-5)
@@ -619,6 +696,7 @@ def test_process_data_long_position_partial_short_disagreement_exits_without_ree
     c1 = _FakeIndicator()
     c1.set_for(data, crossed=False, direction=Signal.LONG, line_value=1.0)
     strategy._indicators = [baseline, c1]
+    strategy._trigger_indicators = [baseline, c1]
     strategy.p = SimpleNamespace(baseline=baseline)
     strategy._state = {id(data): _TwoTradeDataState(atr=[1.0])}
     recorded = []
@@ -644,6 +722,7 @@ def test_process_data_short_position_partial_long_disagreement_exits_without_ree
     c1 = _FakeIndicator()
     c1.set_for(data, crossed=False, direction=Signal.SHORT, line_value=1.0)
     strategy._indicators = [baseline, c1]
+    strategy._trigger_indicators = [baseline, c1]
     strategy.p = SimpleNamespace(baseline=baseline)
     strategy._state = {id(data): _TwoTradeDataState(atr=[1.0])}
     recorded = []
@@ -666,6 +745,7 @@ def test_process_data_mixed_signals_flat_position_does_nothing():
     c1 = _FakeIndicator()
     c1.set_for(data, crossed=False, direction=Signal.SHORT, line_value=1.0)
     strategy._indicators = [baseline, c1]
+    strategy._trigger_indicators = [baseline, c1]
     strategy.p = SimpleNamespace(baseline=baseline)
     strategy._state = {id(data): _TwoTradeDataState(atr=[1.0])}
     recorded = []
@@ -708,6 +788,7 @@ def test_nnfx_base_init_wires_baseline_and_state_per_data():
     NNFXBaseStrategy.__init__(strategy)
 
     assert strategy._indicators == [baseline]
+    assert strategy._trigger_indicators == [baseline]
     assert baseline.reset_calls == 1
     assert baseline.setup_calls == [(strategy, data, False)]
     assert strategy._state[id(data)].atr[0] == pytest.approx(2.5)
@@ -756,6 +837,8 @@ def test_phase2_strategy_init_appends_c1_to_indicators():
     Phase2Strategy.__init__(strategy)
 
     assert strategy._indicators == [baseline, c1]
+    # C1's own cross is a valid entry trigger (NNFX's Standard Entry).
+    assert strategy._trigger_indicators == [baseline, c1]
     assert c1.reset_calls == 1
     assert c1.setup_calls == [(strategy, data, False)]
 
@@ -772,6 +855,73 @@ def test_phase2_strategy_init_wires_c1_for_each_data():
 
     assert c1.reset_calls == 1
     assert c1.setup_calls == [(strategy, data1, False), (strategy, data2, False)]
+
+
+# Phase3Strategy __init__ wiring
+
+def test_phase3_strategy_init_appends_c2_to_indicators():
+    strategy = _new_strategy(Phase3Strategy)
+    baseline = _FakeIndicator()
+    c1 = _FakeIndicator()
+    c2 = _FakeIndicator()
+    data = _fake_data_feed()
+    strategy.p = SimpleNamespace(baseline=baseline, atr_col="ATR_Buffer_0", c1=c1, c2=c2, plot_indicators=False)
+    strategy.datas = [data]
+
+    Phase3Strategy.__init__(strategy)
+
+    assert strategy._indicators == [baseline, c1, c2]
+    # C2 must still agree on direction, but per the NNFX flow chart its own
+    # cross never fires an entry on its own -- only Baseline/C1 do.
+    assert strategy._trigger_indicators == [baseline, c1]
+    assert c2.reset_calls == 1
+    assert c2.setup_calls == [(strategy, data, False)]
+
+
+def test_phase3_strategy_c2_only_cross_does_not_enter_even_if_all_agree():
+    """Per the NNFX flow chart, only Baseline or C1 giving a fresh signal
+    may trigger an entry (Standard Entry / Baseline Entry) -- C2 only ever
+    "Agrees" or disagrees. So a bar where baseline+c1 haven't crossed but
+    c2 has, with all three nonetheless pointing the same direction, must
+    not enter -- unlike a Phase2-style unanimity check keyed off
+    _indicators, which would wrongly treat c2's cross as sufficient."""
+    strategy = _new_strategy(Phase3Strategy)
+    data = _data()
+    baseline = _FakeIndicator()
+    baseline.set_for(data, crossed=False, direction=Signal.LONG, line_value=1.0)
+    c1 = _FakeIndicator()
+    c1.set_for(data, crossed=False, direction=Signal.LONG, line_value=1.0)
+    c2 = _FakeIndicator()
+    c2.set_for(data, crossed=True, direction=Signal.LONG, line_value=1.0)
+    strategy._indicators = [baseline, c1, c2]
+    strategy._trigger_indicators = [baseline, c1]
+    strategy.p = SimpleNamespace(baseline=baseline)
+    strategy._state = {id(data): _TwoTradeDataState(atr=[1.0])}
+    recorded = []
+    strategy.getposition = lambda d: SimpleNamespace(size=0)
+    strategy.close = lambda data: recorded.append(("close", data))
+    strategy._cancel_all = lambda d: recorded.append(("cancel_all", d))
+    strategy._enter_long = lambda d: recorded.append(("enter_long", d))
+    strategy._enter_short = lambda d: recorded.append(("enter_short", d))
+
+    strategy._process_data(data)
+
+    assert recorded == []
+
+
+def test_phase3_strategy_init_wires_c2_for_each_data():
+    strategy = _new_strategy(Phase3Strategy)
+    baseline = _FakeIndicator()
+    c1 = _FakeIndicator()
+    c2 = _FakeIndicator()
+    data1, data2 = _fake_data_feed(), _fake_data_feed()
+    strategy.p = SimpleNamespace(baseline=baseline, atr_col="ATR_Buffer_0", c1=c1, c2=c2, plot_indicators=False)
+    strategy.datas = [data1, data2]
+
+    Phase3Strategy.__init__(strategy)
+
+    assert c2.reset_calls == 1
+    assert c2.setup_calls == [(strategy, data1, False), (strategy, data2, False)]
 
 
 # Phase5Strategy __init__ wiring
