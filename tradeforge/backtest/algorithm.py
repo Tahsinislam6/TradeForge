@@ -1,4 +1,5 @@
 import math
+from dataclasses import dataclass
 
 import backtrader as bt
 
@@ -33,12 +34,23 @@ class _TwoTradeDataState(_DataState):
         self.t2_entry_price = None
 
 
+@dataclass(frozen=True)
+class _PendingTrigger:
+    """One-candle-rule grace state: a trigger fired and every indicator
+    already agreed, but the ATR-distance-to-baseline gate blocked entry.
+    Checked (and unconditionally discarded) on exactly the next bar."""
+
+    direction: Signal
+    signal_close: float
+
+
 class NNFXBaseStrategy(bt.Strategy):
 
     SL_MULTIPLIER    = 1.5
     RISK_PCT         = 0.02
     TRADE2_SIZE_PCT  = 0.5
     BASELINE_ENTRY_ATR_MULTIPLIER = 1.0
+    ONE_CANDLE_GRACE_ATR_MULTIPLIER = 1.0
 
     params = dict(
         baseline=None,
@@ -64,6 +76,7 @@ class NNFXBaseStrategy(bt.Strategy):
         self._indicators: list[Indicator] = [self.p.baseline]
         self._trigger_indicators: list[Indicator] = [self.p.baseline]
         self._state: dict[int, _DataState] = {}
+        self._pending_triggers: dict[int, _PendingTrigger] = {}
         self.p.baseline.reset()
         for data in self.datas:
             self.p.baseline.setup(self, data, plot=self.p.plot_indicators)
@@ -83,6 +96,14 @@ class NNFXBaseStrategy(bt.Strategy):
         baseline_value = self.p.baseline.line(data)[0]
         distance = abs(data.close[0] - baseline_value)
         return distance <= state.atr[0] * self.BASELINE_ENTRY_ATR_MULTIPLIER
+
+    def _price_within_atr_of_signal_close(self, data, pending: _PendingTrigger) -> bool:
+        """One-candle-rule distance gate: on the late (N+1) bar, price must
+        still be within 1x *current-bar* ATR of the signal candle's (N)
+        close -- otherwise the grace window is a bridge too far as well."""
+        state = self._state[id(data)]
+        distance = abs(data.close[0] - pending.signal_close)
+        return distance <= state.atr[0] * self.ONE_CANDLE_GRACE_ATR_MULTIPLIER
 
     def _get_directions(self, data) -> list[Signal]:
         return [ind.direction(data) for ind in self._indicators]
@@ -215,6 +236,11 @@ class NNFXBaseStrategy(bt.Strategy):
 
     def _process_data(self, data):
         state = self._state[id(data)]
+        # Popped unconditionally, every bar, before any of the guards below
+        # -- a pending grace trigger is checked on exactly the next bar and
+        # never survives past it, even if that next bar turns out invalid.
+        pending = self._pending_triggers.pop(id(data), None)
+
         # NaN-only: the data loader already turns each indicator's own
         # warmup placeholder into NaN (see _nan_leading_warmup), whatever
         # sentinel value it happens to use, so a bare 0 reading past that
@@ -232,7 +258,8 @@ class NNFXBaseStrategy(bt.Strategy):
         if state.atr[0] != state.atr[0] or state.atr[0] == 0:
             return
 
-        if not self._any_trigger(data):
+        triggered_now = self._any_trigger(data)
+        if not triggered_now and pending is None:
             return
 
         directions = self._get_directions(data)
@@ -252,13 +279,25 @@ class NNFXBaseStrategy(bt.Strategy):
             self.close(data=data)
             return
 
+        # One-candle rule (Standard Entry / Baseline Entry only): if a
+        # trigger fires while every layer already agrees but price is more
+        # than 1x ATR from baseline, arm a one-bar grace window instead of
+        # dropping the trade outright. A fresh same-bar trigger always takes
+        # priority over a leftover pending window -- see _process_data's
+        # unconditional pop above.
         if all_long:
             if position.size > 0:
                 return
             if position.size < 0:
                 self._cancel_all(data)
                 self.close(data=data)
-            if self._price_within_atr_of_baseline(data):
+            if triggered_now:
+                if self._price_within_atr_of_baseline(data):
+                    self._enter_long(data)
+                else:
+                    self._pending_triggers[id(data)] = _PendingTrigger(Signal.LONG, data.close[0])
+            elif pending is not None and pending.direction == Signal.LONG \
+                    and self._price_within_atr_of_signal_close(data, pending):
                 self._enter_long(data)
 
         elif all_short:
@@ -267,7 +306,13 @@ class NNFXBaseStrategy(bt.Strategy):
             if position.size > 0:
                 self._cancel_all(data)
                 self.close(data=data)
-            if self._price_within_atr_of_baseline(data):
+            if triggered_now:
+                if self._price_within_atr_of_baseline(data):
+                    self._enter_short(data)
+                else:
+                    self._pending_triggers[id(data)] = _PendingTrigger(Signal.SHORT, data.close[0])
+            elif pending is not None and pending.direction == Signal.SHORT \
+                    and self._price_within_atr_of_signal_close(data, pending):
                 self._enter_short(data)
 
 
