@@ -17,7 +17,9 @@ from tradeforge.backtest.config import ExitReason, Signal
 def _new_strategy(cls=NNFXBaseStrategy):
     """Bypass MetaStrategy.donew, which requires a live Cerebro found by
     walking the call stack, so these can be exercised standalone."""
-    return cls.__new__(cls)
+    strategy = cls.__new__(cls)
+    strategy._pending_triggers = {}
+    return strategy
 
 
 def _data(atr=1.0, close=100.0, name="EURUSD"):
@@ -672,6 +674,143 @@ def test_process_data_reversal_still_closes_when_entry_filtered_by_atr_distance(
     strategy.getposition = lambda d: SimpleNamespace(size=-5)
 
     strategy._process_data(data)
+
+    assert recorded == [("cancel_all", data), ("close", data)]
+
+
+# One-candle rule (Standard/Baseline Entry timing exception)
+#
+# These tests reuse the same `data`/`strategy` pair across two or three
+# simulated bars (mutating close/indicator state between _process_data
+# calls) rather than building a fresh fixture per bar, since pending-grace
+# state is keyed by id(data).
+
+def test_process_data_arms_and_fires_one_candle_grace_entry():
+    """Bar N: trigger fires, all indicators agree long, but price is beyond
+    1x ATR of baseline -> blocked, grace window armed instead of dropped.
+    Bar N+1: nothing has reversed and price hasn't drifted from the signal
+    close -> the trade fires a bar late."""
+    strategy, data, recorded = _ready_strategy(direction=Signal.LONG, line_value=90.0, atr_value=1.0)
+    strategy.getposition = lambda d: SimpleNamespace(size=0)
+
+    strategy._process_data(data)  # bar N: signal close = 100, blocked by baseline distance
+    assert recorded == []
+
+    strategy.p.baseline.set_for(data, crossed=False, direction=Signal.LONG, line_value=90.0)
+    strategy._process_data(data)  # bar N+1: no fresh cross, but grace window is live
+
+    assert recorded == [("enter_long", data)]
+
+
+def test_process_data_one_candle_grace_expires_after_one_bar():
+    """The grace window is checked on exactly the next bar and never
+    survives longer, even if conditions would otherwise still pass."""
+    strategy, data, recorded = _ready_strategy(direction=Signal.LONG, line_value=90.0, atr_value=1.0)
+    strategy.getposition = lambda d: SimpleNamespace(size=0)
+
+    strategy._process_data(data)  # bar N: signal close = 100, armed
+    assert recorded == []
+
+    strategy.p.baseline.set_for(data, crossed=False, direction=Signal.LONG, line_value=90.0)
+    data.close[0] = 105.0  # bar N+1: too far from the signal close -> still no entry
+    strategy._process_data(data)
+    assert recorded == []
+
+    data.close[0] = 100.0  # bar N+2: back in range, but the window already expired
+    strategy._process_data(data)
+    assert recorded == []
+
+
+def test_process_data_one_candle_grace_cleared_by_reversal():
+    """If direction reverses before the grace bar, the pending trigger no
+    longer matches and is not resurrected."""
+    strategy, data, recorded = _ready_strategy(direction=Signal.LONG, line_value=90.0, atr_value=1.0)
+    strategy.getposition = lambda d: SimpleNamespace(size=0)
+
+    strategy._process_data(data)  # bar N: armed long
+    assert recorded == []
+
+    strategy.p.baseline.set_for(data, crossed=False, direction=Signal.SHORT, line_value=90.0)
+    strategy._process_data(data)  # bar N+1: reversed to short
+
+    assert recorded == []
+
+
+def test_process_data_one_candle_grace_blocked_when_price_drifts_beyond_atr_of_signal_close():
+    strategy, data, recorded = _ready_strategy(direction=Signal.LONG, line_value=90.0, atr_value=1.0)
+    strategy.getposition = lambda d: SimpleNamespace(size=0)
+
+    strategy._process_data(data)  # bar N: signal close = 100, armed
+    assert recorded == []
+
+    strategy.p.baseline.set_for(data, crossed=False, direction=Signal.LONG, line_value=90.0)
+    data.close[0] = 101.5  # 1.5x ATR away from the signal close of 100
+    strategy._process_data(data)
+
+    assert recorded == []
+
+
+def test_process_data_one_candle_grace_enters_at_exact_atr_boundary():
+    """"Within 1x ATR" of the signal close is inclusive of the boundary,
+    same as the same-bar baseline-distance filter."""
+    strategy, data, recorded = _ready_strategy(direction=Signal.LONG, line_value=90.0, atr_value=1.0)
+    strategy.getposition = lambda d: SimpleNamespace(size=0)
+
+    strategy._process_data(data)  # bar N: signal close = 100, armed
+    assert recorded == []
+
+    strategy.p.baseline.set_for(data, crossed=False, direction=Signal.LONG, line_value=90.0)
+    data.close[0] = 101.0  # exactly 1x ATR away from the signal close of 100
+    strategy._process_data(data)
+
+    assert recorded == [("enter_long", data)]
+
+
+def test_process_data_unanimity_miss_does_not_arm_grace():
+    """Narrow scope: if the trigger fires but full unanimity hasn't formed
+    yet (e.g. a confirmation layer still disagrees), no grace window is
+    armed at all -- even if everything lines up next bar, that's a plain
+    miss, not what the one-candle rule covers."""
+    strategy, data, recorded = _ready_strategy(direction=Signal.LONG, line_value=99.5, atr_value=1.0)
+    c2 = _FakeIndicator()
+    c2.set_for(data, crossed=False, direction=Signal.SHORT, line_value=1.0)
+    strategy._indicators.append(c2)
+    strategy.getposition = lambda d: SimpleNamespace(size=0)
+
+    strategy._process_data(data)  # bar N: baseline triggers long, c2 disagrees -> nothing armed
+    assert recorded == []
+
+    c2.set_for(data, crossed=False, direction=Signal.LONG, line_value=1.0)
+    strategy.p.baseline.set_for(data, crossed=False, direction=Signal.LONG, line_value=99.5)
+    strategy._process_data(data)  # bar N+1: now unanimous, but nothing was armed on N
+
+    assert recorded == []
+
+
+def test_process_data_one_candle_grace_does_not_interfere_with_defensive_close():
+    """A pending grace trigger from a prior bar must not block, or survive
+    past, a defensive close on partial disagreement."""
+    strategy, data, recorded = _ready_strategy(direction=Signal.SHORT, line_value=110.0, atr_value=1.0)
+    strategy.getposition = lambda d: SimpleNamespace(size=0)
+
+    strategy._process_data(data)  # bar N: short trigger blocked by baseline distance -> armed
+    assert recorded == []
+
+    c1 = _FakeIndicator()
+    c1.set_for(data, crossed=False, direction=Signal.LONG, line_value=1.0)
+    strategy._indicators.append(c1)
+    strategy.p.baseline.set_for(data, crossed=False, direction=Signal.SHORT, line_value=110.0)
+    strategy.getposition = lambda d: SimpleNamespace(size=-5)
+
+    strategy._process_data(data)  # bar N+1: partial disagreement -> defensive close, pending discarded
+
+    assert recorded == [("cancel_all", data), ("close", data)]
+
+    strategy._indicators = [strategy.p.baseline]
+    strategy.getposition = lambda d: SimpleNamespace(size=0)
+    strategy.p.baseline.set_for(data, crossed=False, direction=Signal.SHORT, line_value=110.0)
+
+    strategy._process_data(data)  # bar N+2: the stale pending did not survive the close bar
 
     assert recorded == [("cancel_all", data), ("close", data)]
 

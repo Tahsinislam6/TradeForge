@@ -133,8 +133,9 @@ class _TwoLinePlot(bt.Indicator):
 class PriceCrossIndicator(Indicator):
     """Close price crosses above/below the indicator line."""
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, name: str, parameters: list, buffer_values: list[int],
+                 label: str, reverse: bool = False, max_warmup_bars: int | None = None):
+        super().__init__(name, parameters, buffer_values, label, reverse, max_warmup_bars)
         self._line = {}
         self._cross = {}
         self._close = {}
@@ -174,8 +175,10 @@ class PriceCrossIndicator(Indicator):
 class LineCrossIndicator(Indicator):
     """Indicator line crosses above/below a configurable level."""
 
-    def __init__(self, *args, cross_level: float = 0.0, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, name: str, parameters: list, buffer_values: list[int],
+                 label: str, reverse: bool = False, max_warmup_bars: int | None = None,
+                 cross_level: float = 0.0):
+        super().__init__(name, parameters, buffer_values, label, reverse, max_warmup_bars)
         self.cross_level = cross_level
         self._line = {}
         self._cross = {}
@@ -217,8 +220,9 @@ class LineCrossIndicator(Indicator):
 class TwoLineCrossIndicator(Indicator):
     """Fast line crosses above/below slow line."""
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, name: str, parameters: list, buffer_values: list[int],
+                 label: str, reverse: bool = False, max_warmup_bars: int | None = None):
+        super().__init__(name, parameters, buffer_values, label, reverse, max_warmup_bars)
         self._fast = {}
         self._slow = {}
         self._cross = {}

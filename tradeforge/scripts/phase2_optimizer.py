@@ -410,6 +410,10 @@ def run_all(
 
 
 def run_p2_optimizer(trials: int=None, currencies=None, only: str=None, workers: int=1, log_timing: bool=None):
+    if Bt_Config.BASELINE is None:
+            raise SystemExit(
+                "Bt_Config.BASELINE isn't set"
+            )
     if not currencies:
         currencies = Config.IN_SAMPLE
 
