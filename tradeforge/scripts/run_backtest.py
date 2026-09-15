@@ -64,9 +64,10 @@ def _fetch_optional(indicator: Indicator | None, cacheable: bool, cached_data: d
 def _load_currency_data(
     currencies: list[str], baseline: Indicator, c1: Indicator | None, trial: int,
     cached_data: dict | None = None, print_results: bool = True, exit_indicator: Indicator | None = None,
-    c2: Indicator | None = None,
+    c2: Indicator | None = None, volume_filter: Indicator | None = None,
 ):
-    """Fetch + merge OHLC/ATR/baseline/(c1)/(c2)/(exit_indicator) data for each currency.
+    """Fetch + merge OHLC/ATR/baseline/(c1)/(c2)/(exit_indicator)/(volume_filter)
+    data for each currency.
 
     Returns (indicator_cols, strategy_kwargs, dfs_by_currency).
     """
@@ -78,10 +79,11 @@ def _load_currency_data(
     c1_cached, c1_dfs             = _fetch_optional(c1, True, cached_data, currencies, trial)
     c2_cached, c2_dfs             = _fetch_optional(c2, False, cached_data, currencies, trial)
     exit_cached, exit_dfs         = _fetch_optional(exit_indicator, False, cached_data, currencies, trial)
+    volume_cached, volume_dfs     = _fetch_optional(volume_filter, False, cached_data, currencies, trial)
 
     indicator_cols = baseline.col_names + ["ATR_Buffer_0"]
     strategy_kwargs = {"baseline": baseline}
-    for kwarg_name, indicator in (("c1", c1), ("c2", c2), ("exit_indicator", exit_indicator)):
+    for kwarg_name, indicator in (("c1", c1), ("c2", c2), ("exit_indicator", exit_indicator), ("volume_filter", volume_filter)):
         if indicator:
             indicator_cols += indicator.col_names
             strategy_kwargs[kwarg_name] = indicator
@@ -94,6 +96,7 @@ def _load_currency_data(
             (c1, c1_cached, c1_dfs),
             (c2, c2_cached, c2_dfs),
             (exit_indicator, exit_cached, exit_dfs),
+            (volume_filter, volume_cached, volume_dfs),
         ):
             if indicator and not is_cached:
                 dfs.append(per_currency_dfs[currency])
@@ -211,11 +214,13 @@ def run_backtest(
     log_timing: bool = False,
     exit_indicator: Indicator | None = None,
     c2: Indicator | None = None,
+    volume_filter: Indicator | None = None,
     currencies: list[str] = None,
 ) -> BacktestSummary:
-    """Backtest a baseline (+ optional C1) (+ optional C2) (+ optional exit
-    indicator) strategy on one or more currency pairs in a single Cerebro
-    run, sharing one portfolio equity/risk budget.
+    """Backtest a baseline (+ optional C1) (+ optional C2) (+ optional
+    volume filter) (+ optional exit indicator) strategy on one or more
+    currency pairs in a single Cerebro run, sharing one portfolio
+    equity/risk budget.
 
     Args:
         cached_data: Pre-loaded static OHLC/ATR data keyed by currency (from
@@ -230,7 +235,10 @@ def run_backtest(
             with strategy=Phase5Strategy -- ignored (and simply never
             requested/merged) otherwise.
         c2: Phase 3's secondary confirmation indicator. Only meaningful with
-            strategy=Phase3Strategy -- ignored (and simply never
+            strategy=Phase3Strategy (or Phase4Strategy) -- ignored (and
+            simply never requested/merged) otherwise.
+        volume_filter: Phase 4's volume/volatility gate. Only meaningful with
+            strategy=Phase4Strategy -- ignored (and simply never
             requested/merged) otherwise.
     """
     if not currencies:
@@ -238,7 +246,8 @@ def run_backtest(
 
     t0 = time.perf_counter()
     indicator_cols, strategy_kwargs, dfs_by_currency = _load_currency_data(
-        currencies, baseline, c1, trial, cached_data, print_results, exit_indicator=exit_indicator, c2=c2,
+        currencies, baseline, c1, trial, cached_data, print_results,
+        exit_indicator=exit_indicator, c2=c2, volume_filter=volume_filter,
     )
     t1 = time.perf_counter()
     cerebro, strat = _run_cerebro(currencies, dfs_by_currency, indicator_cols, strategy, strategy_kwargs, initial_cash, plot)

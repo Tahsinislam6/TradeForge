@@ -5,10 +5,12 @@ import pytest
 from tradeforge.backtest.bt_feed import make_bt_feed
 from tradeforge.backtest.config import (
     MT4_EMPTY_VALUE,
+    LevelGateIndicator,
     LineCrossIndicator,
     PriceCrossIndicator,
     Signal,
     TwoLineCrossIndicator,
+    TwoLineGateIndicator,
 )
 
 
@@ -379,3 +381,196 @@ def test_two_line_cross_setup_builds_two_line_plot_when_requested():
     strat = _run_probe(df, ["C1_Buffer_0", "C1_Buffer_1"], ind, plot=True)
 
     assert len(strat.getindicators()) == 2  # CrossOver + cosmetic _TwoLinePlot
+
+
+# LevelGateIndicator / TwoLineGateIndicator -- Phase 4's volume/volatility
+# gate shapes. Neither has a direction: crossed()/direction() are neutered
+# stubs (see FilterIndicator), so only allows() is exercised here.
+
+def _level_gate(gate_level=0.0):
+    return LevelGateIndicator(name="x", parameters=[], buffer_values=[0], label="Volume", gate_level=gate_level)
+
+
+def test_level_gate_crossed_is_always_false():
+    ind = _level_gate()
+    data = object()
+    ind._line[id(data)] = [100.0]
+
+    assert ind.crossed(data) is False
+
+
+def test_level_gate_direction_is_always_none():
+    ind = _level_gate()
+    data = object()
+    ind._line[id(data)] = [100.0]
+
+    assert ind.direction(data) == Signal.NONE
+
+
+def test_level_gate_allows_true_above_level():
+    ind = _level_gate(gate_level=20.0)
+    data = object()
+    ind._line[id(data)] = [20.1]
+
+    assert ind.allows(data) is True
+
+
+def test_level_gate_allows_false_below_level():
+    ind = _level_gate(gate_level=20.0)
+    data = object()
+    ind._line[id(data)] = [19.9]
+
+    assert ind.allows(data) is False
+
+
+def test_level_gate_allows_false_exactly_at_level():
+    """Boundary is exclusive, same convention as LineCrossIndicator's own
+    cross_level direction split (exactly-at-level is neither long nor
+    short there either)."""
+    ind = _level_gate(gate_level=20.0)
+    data = object()
+    ind._line[id(data)] = [20.0]
+
+    assert ind.allows(data) is False
+
+
+def test_level_gate_allows_false_on_nan():
+    ind = _level_gate(gate_level=20.0)
+    data = object()
+    ind._line[id(data)] = [float("nan")]
+
+    assert ind.allows(data) is False
+
+
+def test_level_gate_reset_clears_bindings():
+    ind = _level_gate()
+    data = object()
+    ind._line[id(data)] = [1.0]
+
+    ind.reset()
+
+    assert ind._line == {}
+
+
+def _two_line_gate(gate_buffers=(0, 1)):
+    return TwoLineGateIndicator(name="x", parameters=[], buffer_values=[0, 1], label="Volume", gate_buffers=gate_buffers)
+
+
+def test_two_line_gate_crossed_is_always_false():
+    ind = _two_line_gate()
+    data = object()
+    ind._a[id(data)] = [1.0]
+    ind._b[id(data)] = [1.0]
+
+    assert ind.crossed(data) is False
+
+
+def test_two_line_gate_direction_is_always_none():
+    ind = _two_line_gate()
+    data = object()
+    ind._a[id(data)] = [1.0]
+    ind._b[id(data)] = [1.0]
+
+    assert ind.direction(data) == Signal.NONE
+
+
+def test_two_line_gate_allows_true_when_a_above_b():
+    ind = _two_line_gate()
+    data = object()
+    ind._a[id(data)] = [1.1]
+    ind._b[id(data)] = [1.0]
+
+    assert ind.allows(data) is True
+
+
+def test_two_line_gate_allows_false_when_a_below_b():
+    ind = _two_line_gate()
+    data = object()
+    ind._a[id(data)] = [0.9]
+    ind._b[id(data)] = [1.0]
+
+    assert ind.allows(data) is False
+
+
+def test_two_line_gate_allows_false_when_equal():
+    """Boundary is exclusive, same convention as TwoLineCrossIndicator's
+    own fast-vs-slow direction split."""
+    ind = _two_line_gate()
+    data = object()
+    ind._a[id(data)] = [1.0]
+    ind._b[id(data)] = [1.0]
+
+    assert ind.allows(data) is False
+
+
+def test_two_line_gate_allows_false_on_nan():
+    ind = _two_line_gate()
+    data = object()
+    ind._a[id(data)] = [float("nan")]
+    ind._b[id(data)] = [1.0]
+
+    assert ind.allows(data) is False
+
+
+def test_two_line_gate_line_returns_a():
+    ind = _two_line_gate()
+    data = object()
+    ind._a[id(data)] = [7.0]
+    ind._b[id(data)] = [10.0]
+
+    assert ind.line(data) == [7.0]
+
+
+def test_two_line_gate_reset_clears_bindings():
+    ind = _two_line_gate()
+    data = object()
+    ind._a[id(data)] = [1.0]
+    ind._b[id(data)] = [1.0]
+
+    ind.reset()
+
+    assert ind._a == {}
+    assert ind._b == {}
+
+
+# setup() -- real backtrader wiring, verified end-to-end (mirrors the
+# LineCrossIndicator/TwoLineCrossIndicator setup() tests above).
+
+class _FilterProbe(bt.Strategy):
+    params = dict(indicator=None, plot_indicators=False)
+
+    def __init__(self):
+        self.p.indicator.reset()
+        self.p.indicator.setup(self, self.data, plot=self.p.plot_indicators)
+        self.log = []
+
+    def next(self):
+        self.log.append(self.p.indicator.allows(self.data))
+
+
+def _run_filter_probe(df, indicator_cols, indicator, plot=False):
+    feed = make_bt_feed(df, indicator_cols=indicator_cols)
+    cerebro = bt.Cerebro()
+    cerebro.adddata(feed)
+    cerebro.addstrategy(_FilterProbe, indicator=indicator, plot_indicators=plot)
+    return cerebro.run()[0]
+
+
+def test_level_gate_setup_tracks_real_buffer_values():
+    df = _ohlcv(_datetimes(4), close=[1] * 4, Volume_Buffer_0=[19.0, 20.0, 20.1, 25.0])
+    ind = _level_gate(gate_level=20.0)
+
+    strat = _run_filter_probe(df, ["Volume_Buffer_0"], ind)
+
+    assert strat.log == [False, False, True, True]
+    ind.reset()
+    assert ind._line == {}
+
+
+def test_two_line_gate_setup_tracks_real_buffer_values():
+    df = _ohlcv(_datetimes(3), close=[1] * 3, Volume_Buffer_0=[9, 11, 10], Volume_Buffer_1=[10, 10, 10])
+    ind = _two_line_gate()
+
+    strat = _run_filter_probe(df, ["Volume_Buffer_0", "Volume_Buffer_1"], ind)
+
+    assert strat.log == [False, True, False]

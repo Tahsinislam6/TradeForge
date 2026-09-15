@@ -3,7 +3,7 @@ import argparse
 from tradeforge.scripts.phase1_analyzer import run_p1_analyzer
 from tradeforge.scripts.run_backtest import run_backtest, print_summary
 from tradeforge.backtest.candidates.bt_candidate_config import Bt_Config
-from tradeforge.backtest.algorithm import Phase2Strategy
+from tradeforge.backtest.algorithm import Phase2Strategy, Phase3Strategy
 from tradeforge.utils.display import parse_number
 from tradeforge.config import Config
 
@@ -55,6 +55,16 @@ def register(subparser: "argparse._SubParsersAction[argparse.ArgumentParser]") -
         baseline=Bt_Config.BASELINE,
         c1=Bt_Config.C1,
         strategy=Phase2Strategy,
+        plot= args.plot,
+        currencies=args.currencies,
+    )))
+
+    p3 = analyze_sub.add_parser("P3", parents=[common, common_bt])
+    p3.set_defaults(func=lambda args: print_summary(run_backtest(
+        baseline=Bt_Config.BASELINE,
+        c1=Bt_Config.C1,
+        c2=Bt_Config.C2,
+        strategy=Phase3Strategy,
         plot= args.plot,
         currencies=args.currencies,
     )))

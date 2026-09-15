@@ -8,6 +8,7 @@ from tradeforge.backtest.algorithm import (
     Phase1Strategy,
     Phase2Strategy,
     Phase3Strategy,
+    Phase4Strategy,
     Phase5Strategy,
     _TwoTradeDataState,
 )
@@ -61,6 +62,28 @@ class _FakeIndicator:
 
     def line(self, data):
         return self._line[id(data)]
+
+
+class _FakeFilter:
+    """Duck-typed FilterIndicator double: records reset/setup calls and
+    returns a canned allows() value per data key."""
+
+    def __init__(self):
+        self.reset_calls = 0
+        self.setup_calls = []
+        self._allows = {}
+
+    def reset(self):
+        self.reset_calls += 1
+
+    def setup(self, strategy, data, plot=False):
+        self.setup_calls.append((strategy, data, plot))
+
+    def set_for(self, data, allows=True):
+        self._allows[id(data)] = allows
+
+    def allows(self, data):
+        return self._allows[id(data)]
 
 
 # _calculate_order_details
@@ -815,6 +838,107 @@ def test_process_data_one_candle_grace_does_not_interfere_with_defensive_close()
     assert recorded == [("cancel_all", data), ("close", data)]
 
 
+# _entry_allowed / NNFXBaseStrategy._process_data placement (Phase 4's
+# volume/volatility filter hook)
+
+def test_entry_allowed_defaults_true():
+    strategy = _new_strategy()
+
+    assert strategy._entry_allowed(_data()) is True
+
+
+def test_process_data_entry_allowed_false_blocks_same_bar_entry():
+    strategy, data, recorded = _ready_strategy(direction=Signal.LONG)
+    strategy.getposition = lambda d: SimpleNamespace(size=0)
+    strategy._entry_allowed = lambda d: False
+
+    strategy._process_data(data)
+
+    assert recorded == []
+
+
+def test_process_data_entry_allowed_false_blocks_short_entry_too():
+    strategy, data, recorded = _ready_strategy(direction=Signal.SHORT)
+    strategy.getposition = lambda d: SimpleNamespace(size=0)
+    strategy._entry_allowed = lambda d: False
+
+    strategy._process_data(data)
+
+    assert recorded == []
+
+
+def test_process_data_entry_allowed_false_does_not_arm_grace_window():
+    """Blocked by the volume filter on bar N (rather than the ATR-distance
+    gate) must not arm a one-candle grace window either -- there's nothing
+    to check a bar later since the filter itself is simply re-checked fresh
+    on whatever bar comes next."""
+    strategy, data, recorded = _ready_strategy(direction=Signal.LONG, line_value=90.0, atr_value=1.0)
+    strategy.getposition = lambda d: SimpleNamespace(size=0)
+    strategy._entry_allowed = lambda d: False
+
+    strategy._process_data(data)  # bar N: entry_allowed=False -> nothing armed
+    assert recorded == []
+
+    strategy._entry_allowed = lambda d: True
+    strategy.p.baseline.set_for(data, crossed=False, direction=Signal.LONG, line_value=90.0)
+    strategy._process_data(data)  # bar N+1: no fresh cross, and nothing was armed on N
+
+    assert recorded == []
+
+
+def test_process_data_grace_entry_blocked_when_filter_disallows_on_grace_bar():
+    """A grace window armed by the ATR-distance gate on bar N must still be
+    re-checked against the volume filter on bar N+1 -- a miss on the grace
+    bar blocks it exactly like a miss on the signal bar would."""
+    strategy, data, recorded = _ready_strategy(direction=Signal.LONG, line_value=90.0, atr_value=1.0)
+    strategy.getposition = lambda d: SimpleNamespace(size=0)
+
+    strategy._process_data(data)  # bar N: blocked by baseline distance, armed
+    assert recorded == []
+
+    strategy._entry_allowed = lambda d: False
+    strategy.p.baseline.set_for(data, crossed=False, direction=Signal.LONG, line_value=90.0)
+    strategy._process_data(data)  # bar N+1: grace window live, but the filter says no
+
+    assert recorded == []
+
+
+def test_process_data_grace_entry_passes_when_filter_allows_on_grace_bar():
+    strategy, data, recorded = _ready_strategy(direction=Signal.LONG, line_value=90.0, atr_value=1.0)
+    strategy.getposition = lambda d: SimpleNamespace(size=0)
+
+    strategy._process_data(data)  # bar N: blocked by baseline distance, armed
+    assert recorded == []
+
+    strategy.p.baseline.set_for(data, crossed=False, direction=Signal.LONG, line_value=90.0)
+    strategy._process_data(data)  # bar N+1: grace window live, filter (default True) allows
+
+    assert recorded == [("enter_long", data)]
+
+
+def test_process_data_entry_allowed_false_does_not_block_defensive_close():
+    strategy, data, recorded = _ready_strategy(direction=Signal.SHORT, line_value=110.0, atr_value=1.0)
+    c1 = _FakeIndicator()
+    c1.set_for(data, crossed=False, direction=Signal.LONG, line_value=1.0)
+    strategy._indicators.append(c1)
+    strategy._entry_allowed = lambda d: False
+    strategy.getposition = lambda d: SimpleNamespace(size=-5)
+
+    strategy._process_data(data)  # partial disagreement -> defensive close
+
+    assert recorded == [("cancel_all", data), ("close", data)]
+
+
+def test_process_data_entry_allowed_false_does_not_block_reversal_close():
+    strategy, data, recorded = _ready_strategy(direction=Signal.LONG, line_value=90.0, atr_value=1.0)
+    strategy.getposition = lambda d: SimpleNamespace(size=-5)
+    strategy._entry_allowed = lambda d: False
+
+    strategy._process_data(data)  # reversal close happens; re-entry is what's blocked
+
+    assert recorded == [("cancel_all", data), ("close", data)]
+
+
 def test_process_data_already_short_all_short_is_a_noop():
     strategy, data, recorded = _ready_strategy(direction=Signal.SHORT)
     strategy.getposition = lambda d: SimpleNamespace(size=-5)
@@ -1061,6 +1185,103 @@ def test_phase3_strategy_init_wires_c2_for_each_data():
 
     assert c2.reset_calls == 1
     assert c2.setup_calls == [(strategy, data1, False), (strategy, data2, False)]
+
+
+# Phase4Strategy __init__ wiring
+
+def _phase4_params(baseline, c1, c2, volume_filter, plot_indicators=False):
+    return SimpleNamespace(
+        baseline=baseline, atr_col="ATR_Buffer_0", c1=c1, c2=c2,
+        volume_filter=volume_filter, plot_indicators=plot_indicators,
+    )
+
+
+def test_phase4_strategy_init_wires_volume_filter_but_not_into_indicators_list():
+    strategy = _new_strategy(Phase4Strategy)
+    baseline, c1, c2 = _FakeIndicator(), _FakeIndicator(), _FakeIndicator()
+    volume_filter = _FakeFilter()
+    data = _fake_data_feed()
+    strategy.p = _phase4_params(baseline, c1, c2, volume_filter)
+    strategy.datas = [data]
+
+    Phase4Strategy.__init__(strategy)
+
+    assert volume_filter.reset_calls == 1
+    assert volume_filter.setup_calls == [(strategy, data, False)]
+    # Entry-gating channel stays exactly [baseline, c1, c2] -- the volume
+    # filter is a separate channel, consulted only via _entry_allowed.
+    assert strategy._indicators == [baseline, c1, c2]
+    assert strategy._trigger_indicators == [baseline, c1]
+
+
+def test_phase4_strategy_init_wires_volume_filter_for_each_data():
+    strategy = _new_strategy(Phase4Strategy)
+    baseline, c1, c2 = _FakeIndicator(), _FakeIndicator(), _FakeIndicator()
+    volume_filter = _FakeFilter()
+    data1, data2 = _fake_data_feed(), _fake_data_feed()
+    strategy.p = _phase4_params(baseline, c1, c2, volume_filter)
+    strategy.datas = [data1, data2]
+
+    Phase4Strategy.__init__(strategy)
+
+    assert volume_filter.reset_calls == 1
+    assert volume_filter.setup_calls == [(strategy, data1, False), (strategy, data2, False)]
+
+
+def test_phase4_strategy_init_passes_plot_flag_through_to_volume_filter_setup():
+    strategy = _new_strategy(Phase4Strategy)
+    baseline, c1, c2 = _FakeIndicator(), _FakeIndicator(), _FakeIndicator()
+    volume_filter = _FakeFilter()
+    data = _fake_data_feed()
+    strategy.p = _phase4_params(baseline, c1, c2, volume_filter, plot_indicators=True)
+    strategy.datas = [data]
+
+    Phase4Strategy.__init__(strategy)
+
+    assert volume_filter.setup_calls == [(strategy, data, True)]
+
+
+# Phase4Strategy._entry_allowed
+
+def test_phase4_strategy_entry_allowed_delegates_to_volume_filter():
+    strategy = _new_strategy(Phase4Strategy)
+    data = _data()
+    volume_filter = _FakeFilter()
+    volume_filter.set_for(data, allows=False)
+    strategy._volume_filter = volume_filter
+
+    assert strategy._entry_allowed(data) is False
+
+    volume_filter.set_for(data, allows=True)
+    assert strategy._entry_allowed(data) is True
+
+
+def test_phase4_strategy_process_data_blocked_when_volume_filter_disallows():
+    """End-to-end: Phase4Strategy._entry_allowed wired into
+    NNFXBaseStrategy._process_data actually blocks the entry."""
+    strategy, data, recorded = _ready_strategy(direction=Signal.LONG)
+    strategy.getposition = lambda d: SimpleNamespace(size=0)
+    volume_filter = _FakeFilter()
+    volume_filter.set_for(data, allows=False)
+    strategy._volume_filter = volume_filter
+    strategy._entry_allowed = lambda d: Phase4Strategy._entry_allowed(strategy, d)
+
+    strategy._process_data(data)
+
+    assert recorded == []
+
+
+def test_phase4_strategy_process_data_enters_when_volume_filter_allows():
+    strategy, data, recorded = _ready_strategy(direction=Signal.LONG)
+    strategy.getposition = lambda d: SimpleNamespace(size=0)
+    volume_filter = _FakeFilter()
+    volume_filter.set_for(data, allows=True)
+    strategy._volume_filter = volume_filter
+    strategy._entry_allowed = lambda d: Phase4Strategy._entry_allowed(strategy, d)
+
+    strategy._process_data(data)
+
+    assert recorded == [("enter_long", data)]
 
 
 # Phase5Strategy __init__ wiring

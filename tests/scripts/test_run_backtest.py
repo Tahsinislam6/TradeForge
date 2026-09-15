@@ -233,6 +233,47 @@ def test_load_currency_data_without_c2_omits_it_from_kwargs():
     assert "c2" not in strategy_kwargs
 
 
+def test_load_currency_data_with_volume_filter_requests_it_and_extends_kwargs(monkeypatch):
+    """Phase 4 sweeps hold baseline+C1+C2 fixed and vary the volume filter
+    every trial -- it must always be requested fresh, same cacheable=False
+    treatment as c2/exit_indicator."""
+    baseline = _indicator(name="Baseline", col_names=["Baseline_Buffer_0"])
+    c1 = _indicator(name="C1", col_names=["C1_Buffer_0"])
+    volume_filter = _indicator(name="Volume", col_names=["Volume_Buffer_0"])
+    cached_data = {
+        "EURUSD_SB": _ohlc_df(["2024.01.01 00:00"])
+        .assign(Baseline_Buffer_0=[1.5])
+        .assign(C1_Buffer_0=[0.7])
+    }
+    requested_for = []
+
+    def fake_request(currencies, indicator, trial):
+        requested_for.append(indicator.name)
+        return {"EURUSD_SB": pd.DataFrame({"DateTime": ["2024.01.01 00:00"], "Volume_Buffer_0": [1.0]})}
+
+    monkeypatch.setattr("tradeforge.scripts.run_backtest.request_and_load_many", fake_request)
+
+    indicator_cols, strategy_kwargs, dfs_by_currency = _load_currency_data(
+        ["EURUSD_SB"], baseline, c1, trial=0, cached_data=cached_data, print_results=False, volume_filter=volume_filter,
+    )
+
+    assert requested_for == ["Volume"]  # baseline+c1 cached, only volume_filter requested
+    assert indicator_cols == ["Baseline_Buffer_0", "ATR_Buffer_0", "C1_Buffer_0", "Volume_Buffer_0"]
+    assert strategy_kwargs == {"baseline": baseline, "c1": c1, "volume_filter": volume_filter}
+    assert dfs_by_currency["EURUSD_SB"]["Volume_Buffer_0"].tolist() == [1.0]
+
+
+def test_load_currency_data_without_volume_filter_omits_it_from_kwargs():
+    baseline = _indicator(name="Baseline", col_names=["Baseline_Buffer_0"])
+    cached_data = {"EURUSD_SB": _ohlc_df(["2024.01.01 00:00"]).assign(Baseline_Buffer_0=[1.5])}
+
+    _, strategy_kwargs, _ = _load_currency_data(
+        ["EURUSD_SB"], baseline, None, trial=0, cached_data=cached_data, print_results=False,
+    )
+
+    assert "volume_filter" not in strategy_kwargs
+
+
 def test_load_currency_data_print_results_true_prints_data_range(capsys):
     baseline = _indicator(name="Baseline", col_names=["Baseline_Buffer_0"])
     cached_data = {
@@ -427,7 +468,7 @@ def test_run_backtest_wires_helpers_and_returns_build_summary_result(monkeypatch
     sentinel_summary = SimpleNamespace(baseline="B", final_value=1.0)
     calls = {}
 
-    def fake_load(currencies, baseline, c1, trial, cached_data, print_results, exit_indicator=None, c2=None):
+    def fake_load(currencies, baseline, c1, trial, cached_data, print_results, exit_indicator=None, c2=None, volume_filter=None):
         calls["load"] = (currencies, baseline, c1, trial, cached_data, print_results, exit_indicator, c2)
         return (["Baseline_Buffer_0"], {"baseline": baseline}, {"EURUSD_SB": "df"})
 
@@ -457,7 +498,7 @@ def test_run_backtest_forwards_exit_indicator_to_load_currency_data(monkeypatch)
     calls = {}
     monkeypatch.setattr(
         "tradeforge.scripts.run_backtest._load_currency_data",
-        lambda currencies, baseline, c1, trial, cached_data, print_results, exit_indicator=None, c2=None:
+        lambda currencies, baseline, c1, trial, cached_data, print_results, exit_indicator=None, c2=None, volume_filter=None:
             calls.update(exit_indicator=exit_indicator) or ([], {}, {}),
     )
     monkeypatch.setattr("tradeforge.scripts.run_backtest._run_cerebro", lambda *a, **k: ("cerebro-obj", "strat-obj"))
@@ -473,7 +514,7 @@ def test_run_backtest_forwards_c2_to_load_currency_data(monkeypatch):
     calls = {}
     monkeypatch.setattr(
         "tradeforge.scripts.run_backtest._load_currency_data",
-        lambda currencies, baseline, c1, trial, cached_data, print_results, exit_indicator=None, c2=None:
+        lambda currencies, baseline, c1, trial, cached_data, print_results, exit_indicator=None, c2=None, volume_filter=None:
             calls.update(c2=c2) or ([], {}, {}),
     )
     monkeypatch.setattr("tradeforge.scripts.run_backtest._run_cerebro", lambda *a, **k: ("cerebro-obj", "strat-obj"))
@@ -483,6 +524,22 @@ def test_run_backtest_forwards_c2_to_load_currency_data(monkeypatch):
     run_backtest(SimpleNamespace(name="Baseline"), currencies=["EURUSD_SB"], c2=c2, print_results=False)
 
     assert calls["c2"] is c2
+
+
+def test_run_backtest_forwards_volume_filter_to_load_currency_data(monkeypatch):
+    calls = {}
+    monkeypatch.setattr(
+        "tradeforge.scripts.run_backtest._load_currency_data",
+        lambda currencies, baseline, c1, trial, cached_data, print_results, exit_indicator=None, c2=None, volume_filter=None:
+            calls.update(volume_filter=volume_filter) or ([], {}, {}),
+    )
+    monkeypatch.setattr("tradeforge.scripts.run_backtest._run_cerebro", lambda *a, **k: ("cerebro-obj", "strat-obj"))
+    monkeypatch.setattr("tradeforge.scripts.run_backtest._build_summary", lambda *a, **k: {})
+
+    volume_filter = SimpleNamespace(name="Volume")
+    run_backtest(SimpleNamespace(name="Baseline"), currencies=["EURUSD_SB"], volume_filter=volume_filter, print_results=False)
+
+    assert calls["volume_filter"] is volume_filter
 
 
 # print_summary

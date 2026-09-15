@@ -122,3 +122,41 @@ def test_p3_forwards_trials_currencies_only_workers(monkeypatch):
     assert captured["currencies"] == ["EURUSD_SB"]
     assert captured["only"] == "Aroon"
     assert captured["workers"] == 2
+
+
+# P4
+
+def test_p4_calls_run_p4_optimizer_with_defaults(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(optimize, "run_p4_optimizer", lambda **kwargs: captured.update(kwargs))
+
+    _parse_and_run(["optimize", "P4"])
+
+    assert captured == {"trials": None, "currencies": None, "only": None, "workers": 1, "log_timing": False}
+
+
+def test_p4_log_timing_flag_forwarded(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(optimize, "run_p4_optimizer", lambda **kwargs: captured.update(kwargs))
+
+    _parse_and_run(["optimize", "P4", "--log-timing"])
+
+    assert captured["log_timing"] is True
+
+
+def test_p4_forwards_trials_currencies_only_workers(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(optimize, "run_p4_optimizer", lambda **kwargs: captured.update(kwargs))
+
+    _parse_and_run([
+        "optimize", "P4",
+        "--trials", "50",
+        "--currencies", "EURUSD_SB",
+        "--only", "WAE",
+        "--workers", "2",
+    ])
+
+    assert captured["trials"] == 50
+    assert captured["currencies"] == ["EURUSD_SB"]
+    assert captured["only"] == "WAE"
+    assert captured["workers"] == 2

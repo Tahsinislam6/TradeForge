@@ -3,6 +3,7 @@ import argparse
 from tradeforge.scripts.phase1_optimizer import run_p1_optimizer
 from tradeforge.scripts.phase2_optimizer import run_p2_optimizer
 from tradeforge.scripts.phase3_optimizer import run_p3_optimizer
+from tradeforge.scripts.phase4_optimizer import run_p4_optimizer
 
 
 def _common_optimizer_args() -> argparse.ArgumentParser:
@@ -49,6 +50,11 @@ def register(subparser: "argparse._SubParsersAction[argparse.ArgumentParser]") -
 
     p3 = optimize_sub.add_parser("P3", parents=[common, common_bt])
     p3.set_defaults(func = lambda args: run_p3_optimizer(
+        trials=args.trials, currencies=args.currencies, only=args.only, workers=args.workers, log_timing=args.log_timing
+    ))
+
+    p4 = optimize_sub.add_parser("P4", parents=[common, common_bt])
+    p4.set_defaults(func = lambda args: run_p4_optimizer(
         trials=args.trials, currencies=args.currencies, only=args.only, workers=args.workers, log_timing=args.log_timing
     ))
 

@@ -108,6 +108,18 @@ class NNFXBaseStrategy(bt.Strategy):
     def _get_directions(self, data) -> list[Signal]:
         return [ind.direction(data) for ind in self._indicators]
 
+    def _entry_allowed(self, data) -> bool:
+        """Extra entry-only gate, consulted once every indicator already
+        agrees and any position-reversal close for this bar has already
+        happened, but before a Standard Entry / Baseline Entry / one-candle-
+        rule grace entry is taken (see _process_data). Never consulted for
+        closes -- the defensive close on partial disagreement and the
+        reversal close both run before this is checked, and neither one
+        needs "is the market active enough to enter" to make sense of
+        "direction no longer agrees". Base implementation always allows;
+        Phase4Strategy overrides this with the volume/volatility filter."""
+        return True
+
     def _calculate_order_details(self, long: bool, data):
         state = self._state[id(data)]
         equity     = self.broker.getvalue()
@@ -291,6 +303,8 @@ class NNFXBaseStrategy(bt.Strategy):
             if position.size < 0:
                 self._cancel_all(data)
                 self.close(data=data)
+            if not self._entry_allowed(data):
+                return
             if triggered_now:
                 if self._price_within_atr_of_baseline(data):
                     self._enter_long(data)
@@ -306,6 +320,8 @@ class NNFXBaseStrategy(bt.Strategy):
             if position.size > 0:
                 self._cancel_all(data)
                 self.close(data=data)
+            if not self._entry_allowed(data):
+                return
             if triggered_now:
                 if self._price_within_atr_of_baseline(data):
                     self._enter_short(data)
@@ -360,6 +376,39 @@ class Phase3Strategy(Phase2Strategy):
         for data in self.datas:
             self.p.c2.setup(self, data, plot=self.p.plot_indicators)
         self._indicators.append(self.p.c2)
+
+
+# Phase 4 — Baseline + C1 + C2 + volume/volatility filter
+#
+# The volume filter is a second, separate channel from self._indicators,
+# same reasoning as Phase5Strategy._exit_indicator one slot later: it has no
+# direction (FilterIndicator's crossed()=False/direction()=Signal.NONE
+# stubs -- see config.py), so appending it to _indicators would fail the
+# all_long/all_short unanimity check on every single bar and the strategy
+# would never trade. It's wired instead through
+# NNFXBaseStrategy._entry_allowed, which only gates new entries (Standard
+# Entry / Baseline Entry / the one-candle-rule grace entry) -- see
+# _process_data for exactly where that check sits, and why the defensive
+# close on partial disagreement and the position-reversal close never
+# consult it. Because the pending one-candle-rule trigger is popped
+# unconditionally at the top of _process_data, a volume miss on the signal
+# bar simply never arms a grace window, and a volume miss on the grace bar
+# itself just lets that window lapse -- no separate bookkeeping needed for
+# either case.
+
+class Phase4Strategy(Phase3Strategy):
+
+    params = dict(volume_filter=None)
+
+    def __init__(self):
+        super().__init__()
+        self._volume_filter = self.p.volume_filter
+        self._volume_filter.reset()
+        for data in self.datas:
+            self._volume_filter.setup(self, data, plot=self.p.plot_indicators)
+
+    def _entry_allowed(self, data) -> bool:
+        return self._volume_filter.allows(data)
 
 
 # Phase 5 — Baseline + C1 + independent exit indicator

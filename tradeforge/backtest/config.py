@@ -217,6 +217,115 @@ class LineCrossIndicator(Indicator):
 
 
 
+class FilterIndicator(Indicator):
+    """Shared base for a volume/volatility gate: answers allows(data) ->
+    bool only -- no direction, no cross-triggered entry, no exit. Unlike
+    PriceCrossIndicator/LineCrossIndicator/TwoLineCrossIndicator, this
+    isn't wired through NNFXBaseStrategy._indicators/_trigger_indicators at
+    all (see Phase4Strategy in algorithm.py) -- it's a separate channel
+    consulted only by NNFXBaseStrategy._entry_allowed, the same pattern
+    Phase5Strategy uses for its independent exit indicator one slot later.
+
+    crossed()/direction() are neutered stubs (False / Signal.NONE) purely
+    so a FilterIndicator still satisfies the Indicator ABC and flows
+    through request_and_load_many/the data loader/max_warmup_bars
+    unchanged -- those only ever touch name/parameters/buffer_values/label/
+    max_warmup_bars, never crossed()/direction(). Do NOT append an instance
+    of this to _indicators or _trigger_indicators: its Signal.NONE stub
+    would fail the all_long/all_short unanimity check on every single bar
+    and the strategy would never trade.
+
+    `reverse` has no meaning for a direction-less gate and is ignored here
+    (accepted only so the constructor signature still matches the other
+    Indicator subclasses)."""
+
+    @abstractmethod
+    def allows(self, data) -> bool:
+        """True if this bar is active enough to allow a new entry. Gates
+        entries only -- never consulted for closes (see
+        NNFXBaseStrategy._entry_allowed)."""
+        ...
+
+    def crossed(self, data) -> bool:
+        return False
+
+    def direction(self, data) -> Signal:
+        return Signal.NONE
+
+
+class LevelGateIndicator(FilterIndicator):
+    """Passes when buffer[0] > gate_level -- e.g. ADX > 20, an ATR ratio >
+    1.0, or a normalized volume line above a floor. Boundary is exclusive
+    (a reading exactly at gate_level does not pass), same convention as
+    LineCrossIndicator's own cross_level direction split (exactly-at-level
+    reads as neither long nor short there either)."""
+
+    def __init__(self, name: str, parameters: list, buffer_values: list[int],
+                 label: str, reverse: bool = False, max_warmup_bars: int | None = None,
+                 gate_level: float = 0.0):
+        super().__init__(name, parameters, buffer_values, label, reverse, max_warmup_bars)
+        self.gate_level = gate_level
+        self._line = {}
+
+    def setup(self, strategy, data, plot: bool = False) -> None:
+        key = id(data)
+        line = getattr(data.lines, f"{self.label}_Buffer_0")
+        self._line[key] = line
+        if plot:
+            _LineCrossPlot(line, cross_level=self.gate_level)
+
+    def reset(self) -> None:
+        self._line.clear()
+
+    def line(self, data):
+        return self._line[id(data)]
+
+    def allows(self, data) -> bool:
+        value = self._line[id(data)][0]
+        if value != value:  # NaN warmup placeholder -- never treat as passing.
+            return False
+        return value > self.gate_level
+
+
+class TwoLineGateIndicator(FilterIndicator):
+    """Passes when buffer[gate_buffers[0]] > buffer[gate_buffers[1]] -- e.g.
+    WAE's explosion line above its dead-zone line, or ATR above its own
+    moving average. Boundary is exclusive, same convention as
+    TwoLineCrossIndicator's fast-vs-slow direction split."""
+
+    def __init__(self, name: str, parameters: list, buffer_values: list[int],
+                 label: str, reverse: bool = False, max_warmup_bars: int | None = None,
+                 gate_buffers: tuple[int, int] = (0, 1)):
+        super().__init__(name, parameters, buffer_values, label, reverse, max_warmup_bars)
+        self.gate_buffers = gate_buffers
+        self._a = {}
+        self._b = {}
+
+    def setup(self, strategy, data, plot: bool = False) -> None:
+        key = id(data)
+        a_idx, b_idx = self.gate_buffers
+        a = getattr(data.lines, f"{self.label}_Buffer_{a_idx}")
+        b = getattr(data.lines, f"{self.label}_Buffer_{b_idx}")
+        self._a[key] = a
+        self._b[key] = b
+        if plot:
+            _TwoLinePlot(a, b)
+
+    def reset(self) -> None:
+        self._a.clear()
+        self._b.clear()
+
+    def line(self, data):
+        return self._a[id(data)]
+
+    def allows(self, data) -> bool:
+        a = self._a[id(data)][0]
+        b = self._b[id(data)][0]
+        if a != a or b != b:  # NaN warmup placeholder -- never treat as passing.
+            return False
+        return a > b
+
+
 class TwoLineCrossIndicator(Indicator):
     """Fast line crosses above/below slow line."""
 

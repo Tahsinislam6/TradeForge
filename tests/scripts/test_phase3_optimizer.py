@@ -20,7 +20,7 @@ from tradeforge.scripts.phase3_optimizer import (
     run_all,
     run_optimization,
 )
-from tradeforge.backtest.candidates.candidate_types import C2Candidate
+from tradeforge.backtest.candidates.candidate_types import C1Candidate
 from tradeforge.backtest.candidates.param_space import IntParam
 from tradeforge.backtest.config import LineCrossIndicator, PriceCrossIndicator
 
@@ -171,7 +171,7 @@ def test_get_constraint_violations_boundary_values_are_feasible():
 # _build_sampler
 
 def _c2_candidate(name="X", sampler="nsga2", param_space=None, cls=PriceCrossIndicator, **kwargs):
-    return C2Candidate(
+    return C1Candidate(
         name=name, cls=cls, buffer_values=[0],
         param_space=param_space or [IntParam(1, 5)], sampler=sampler, **kwargs,
     )
@@ -392,7 +392,7 @@ def test_export_best_trials_falls_back_to_infeasible_best_and_flags_it(tmp_path)
 
 def test_export_best_trials_picks_highest_scoring_among_feasible_trials(tmp_path):
     study = _study_with_trials([
-        _completed_trial(95.0, total_trades=250, win_rate_lift=1.0),  # infeasible; would win on score alone
+        _completed_trial(95.0, total_trades=250, win_rate_lift=-1.0),  # infeasible (below MIN_WIN_RATE_LIFT=0.0); would win on score alone
         _completed_trial(70.0, total_trades=250, win_rate_lift=5.0),  # feasible, lower score
         _completed_trial(85.0, total_trades=250, win_rate_lift=5.0),  # feasible, highest score among feasible
     ])

@@ -1,8 +1,8 @@
 """Candidate dataclasses shared by every phaseN_optimizer.py's sweep list
-(baseline_candidates.py, c1_candidates.py, exit_candidates.py). Kept
-separate from those files so a long, data-heavy candidate list doesn't bury
-the type definitions -- and so the shape stays in exactly one place instead
-of three near-identical copies.
+(baseline_candidates.py, c1_candidates.py, exit_candidates.py,
+volume_candidates.py). Kept separate from those files so a long, data-heavy
+candidate list doesn't bury the type definitions -- and so the shape stays
+in exactly one place instead of four near-identical copies.
 """
 
 from dataclasses import dataclass
@@ -88,3 +88,33 @@ class ExitCandidate(_IndicatorCandidate):
     _IndicatorCandidate for field meanings. With sampler="nsga2", Phase 5's
     hard constraints are Step 3.4's avg_loss_reduction_pct/win_rate lift/
     profit_factor/pct_winners_closed_early (scripts/phase5_optimizer.py)."""
+
+
+@dataclass
+class VolumeCandidate(_IndicatorCandidate):
+    """One volume/volatility filter to sweep in a Phase 4 batch run against
+    the frozen baseline+C1+C2. Kept as its own type (same reasoning as
+    ExitCandidate) even though most fields are shared with
+    C1Candidate/ExitCandidate, so a signature like `vol_spec: VolumeCandidate`
+    stays self-documenting about which pipeline stage it belongs to.
+
+    `cls` here is always FilterIndicator's LevelGateIndicator or
+    TwoLineGateIndicator (config.py), never one of the directional Indicator
+    shapes -- a volume filter has no direction, only "active enough to
+    enter or not" (see Phase4Strategy/NNFXBaseStrategy._entry_allowed in
+    algorithm.py). Two extra fields cover those gate shapes, unused by
+    C1Candidate/ExitCandidate:
+
+    gate_level: LevelGateIndicator's threshold -- passes when buffer[0] >
+        gate_level (e.g. ADX > 20, an ATR ratio > 1.0). Ignored when cls is
+        TwoLineGateIndicator.
+    gate_buffers: TwoLineGateIndicator's (a, b) buffer indices -- passes
+        when buffer[a] > buffer[b] (e.g. WAE's explosion line vs. its dead
+        zone). Ignored when cls is LevelGateIndicator.
+
+    With sampler="nsga2", Phase 4's hard constraints are total_trades/
+    trades_retained_pct/win_rate_lift/profit_factor/drawdown_reduction_pct,
+    all diffed against a frozen Phase 3 (and, for drawdown, Phase 2)
+    reference run (scripts/phase4_optimizer.py)."""
+    gate_level: float = 0.0
+    gate_buffers: tuple[int, int] = (0, 1)

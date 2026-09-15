@@ -124,3 +124,54 @@ def test_p2_currencies_flag_forwarded(monkeypatch):
     _parse_and_run(["analyze", "P2", "--currencies", "EURUSD_SB", "GBPUSD_SB"])
 
     assert captured["currencies"] == ["EURUSD_SB", "GBPUSD_SB"]
+
+
+# P3
+
+def _fake_bt_config_with_c2(baseline_name="Baseline", c1_name="C1", c2_name="C2"):
+    return SimpleNamespace(
+        BASELINE=SimpleNamespace(name=baseline_name),
+        C1=SimpleNamespace(name=c1_name),
+        C2=SimpleNamespace(name=c2_name),
+    )
+
+
+def test_p3_runs_backtest_with_fixed_baseline_c1_and_c2_then_prints_summary(monkeypatch):
+    bt_config = _fake_bt_config_with_c2()
+    monkeypatch.setattr(analyze, "Bt_Config", bt_config)
+    captured = {}
+    monkeypatch.setattr(analyze, "run_backtest", lambda **kwargs: captured.update(kwargs) or "summary-obj")
+    printed = []
+    monkeypatch.setattr(analyze, "print_summary", lambda summary: printed.append(summary))
+
+    _parse_and_run(["analyze", "P3"])
+
+    assert captured["baseline"] is bt_config.BASELINE
+    assert captured["c1"] is bt_config.C1
+    assert captured["c2"] is bt_config.C2
+    assert captured["strategy"] is analyze.Phase3Strategy
+    assert captured["plot"] is False
+    assert captured["currencies"] is None
+    assert printed == ["summary-obj"]
+
+
+def test_p3_plot_flag_forwarded(monkeypatch):
+    monkeypatch.setattr(analyze, "Bt_Config", _fake_bt_config_with_c2())
+    captured = {}
+    monkeypatch.setattr(analyze, "run_backtest", lambda **kwargs: captured.update(kwargs))
+    monkeypatch.setattr(analyze, "print_summary", lambda summary: None)
+
+    _parse_and_run(["analyze", "P3", "--plot"])
+
+    assert captured["plot"] is True
+
+
+def test_p3_currencies_flag_forwarded(monkeypatch):
+    monkeypatch.setattr(analyze, "Bt_Config", _fake_bt_config_with_c2())
+    captured = {}
+    monkeypatch.setattr(analyze, "run_backtest", lambda **kwargs: captured.update(kwargs))
+    monkeypatch.setattr(analyze, "print_summary", lambda summary: None)
+
+    _parse_and_run(["analyze", "P3", "--currencies", "EURUSD_SB", "GBPUSD_SB"])
+
+    assert captured["currencies"] == ["EURUSD_SB", "GBPUSD_SB"]
