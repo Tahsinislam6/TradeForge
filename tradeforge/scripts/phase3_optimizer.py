@@ -8,8 +8,8 @@ from functools import partial
 
 from tradeforge.scripts.run_backtest import request_and_load_many, run_backtest
 from tradeforge.backtest.algorithm import Phase2Strategy, Phase3Strategy
-from tradeforge.backtest.candidates.c2_candidates import C2_CANDIDATES
-from tradeforge.backtest.candidates.candidate_types import C2Candidate
+from tradeforge.backtest.candidates.c1_candidates import C1_CANDIDATES
+from tradeforge.backtest.candidates.candidate_types import C1Candidate
 from tradeforge.backtest.candidates.bt_candidate_config import Bt_Config
 from tradeforge.backtest.candidates.param_space import build_sampler, fixed_values, grid_trial_count, max_warmup_bars, suggest_params
 from tradeforge.backtest.config import *
@@ -28,15 +28,16 @@ from tradeforge.utils.notification import send_notification
 FAILED_TRIAL_VALUE = 1e6
 MIN_TRADES = 200
 
-# A C2 candidate only earns a freeze if it demonstrably improves on "no C2
-# at all" (baseline+C1, Phase2Strategy) by these margins -- same
-# diff-against-a-reference-run precedent as Phase 5's Step 3.4 constraints
-# (see phase5_optimizer.py). A C2 that filters out every C1 signal trivially
-# "improves" win_rate/losses on whatever's left, so MIN_TRADES guards
-# against a candidate that over-filters down to a handful of trades.
-MIN_WIN_RATE_LIFT            = 3.0   # win_rate must gain >= 3 points vs. REFERENCE.win_rate
+# A C2 candidate only earns a freeze if it's at least as good as "no C2 at
+# all" (baseline+C1, Phase2Strategy) -- same diff-against-a-reference-run
+# precedent as Phase 5's Step 3.4 constraints (see phase5_optimizer.py), but
+# with no required margin: any non-negative lift/reduction vs. REFERENCE
+# clears it. A C2 that filters out every C1 signal trivially "improves"
+# win_rate/losses on whatever's left, so MIN_TRADES guards against a
+# candidate that over-filters down to a handful of trades.
+MIN_WIN_RATE_LIFT            = 0.0   # win_rate must be >= REFERENCE.win_rate
 MIN_PROFIT_FACTOR            = 1.2
-MIN_TOTAL_LOSSES_REDUCTION_PCT = 15.0  # gross_loss must shrink >= 15% vs. REFERENCE.gross_loss
+MIN_TOTAL_LOSSES_REDUCTION_PCT = 0.0  # gross_loss must be <= REFERENCE.gross_loss
 
 # Caps for the objective's weighted score below -- a candidate that clears
 # these no longer earns extra score for going further, since the constraints
@@ -113,7 +114,7 @@ def get_constraint_violations(
     )
 
 
-def _build_sampler(c2_spec: C2Candidate) -> optuna.samplers.BaseSampler:
+def _build_sampler(c2_spec: C1Candidate) -> optuna.samplers.BaseSampler:
     return build_sampler(c2_spec.sampler, c2_spec.param_space, constraints_func=partial(
         get_constraint_violations,
         min_trades=MIN_TRADES,
@@ -125,7 +126,7 @@ def _build_sampler(c2_spec: C2Candidate) -> optuna.samplers.BaseSampler:
 
 def objective(
     trial: optuna.Trial, currencies: list[str], baseline: Indicator, c1: Indicator, cached_data: dict,
-    reference: dict, c2_spec: C2Candidate, label: str = "C2", log_timing: bool = False,
+    reference: dict, c2_spec: C1Candidate, label: str = "C2", log_timing: bool = False,
 ):
     parameters = suggest_params(trial, c2_spec.param_space)
     c2_kwargs = dict(
@@ -254,7 +255,7 @@ def export_best_trials_from_db(storage: str = OPTUNA_JOURNAL_PATH, csv_path: Pat
 
 def _run_worker_trials(
     study_name: str, journal_path: str, n_trials: int, currencies: list[str], baseline: Indicator,
-    c1: Indicator, cached_data: dict, reference: dict, c2_spec: C2Candidate, label: str, log_timing: bool,
+    c1: Indicator, cached_data: dict, reference: dict, c2_spec: C1Candidate, label: str, log_timing: bool,
 ) -> None:
     """Entry point for one worker process: load the study `run_optimization`
     already created (by name, from the journal log at `journal_path`) and
@@ -265,7 +266,7 @@ def _run_worker_trials(
 
 def _run_parallel(
     study_name: str, journal_path: str, counts: list[int], currencies: list[str], baseline: Indicator,
-    c1: Indicator, cached_data: dict, reference: dict, c2_spec: C2Candidate, label: str, log_timing: bool,
+    c1: Indicator, cached_data: dict, reference: dict, c2_spec: C1Candidate, label: str, log_timing: bool,
 ) -> None:
     """Run one worker process per entry in `counts` -- see
     tradeforge.backtest.optuna_journal.run_parallel for the coordination
@@ -278,7 +279,7 @@ def run_optimization(
     currencies: list[str],
     baseline: Indicator,
     c1: Indicator,
-    c2_spec: C2Candidate,
+    c2_spec: C1Candidate,
     n_trials: int | None = None,
     cached_data: dict | None = None,
     reference: dict | None = None,
@@ -293,7 +294,7 @@ def run_optimization(
     profit_factor, and total_losses_reduction_pct. With the default "nsga2"
     sampler this also enforces MIN_TRADES/MIN_WIN_RATE_LIFT/
     MIN_PROFIT_FACTOR/MIN_TOTAL_LOSSES_REDUCTION_PCT -- see
-    get_constraint_violations and C2Candidate.sampler for the "grid"
+    get_constraint_violations and C1Candidate.sampler for the "grid"
     alternative and what it does/doesn't enforce.
 
     Args:
@@ -325,7 +326,7 @@ def run_optimization(
     if n_trials is None:
         raise ValueError(
             f"No trial count for '{c2_spec.name}': pass --trials on the CLI, "
-            f"or set n_trials on this C2Candidate (required for sampler='nsga2')."
+            f"or set n_trials on this C1Candidate (required for sampler='nsga2')."
         )
 
     fixed = fixed_values(c2_spec.param_space)
@@ -374,7 +375,7 @@ def run_all(
     baseline: Indicator,
     c1: Indicator,
     n_trials: int | None = None,
-    candidates: list[C2Candidate] = C2_CANDIDATES,
+    candidates: list[C1Candidate] = C1_CANDIDATES,
     log_timing: bool = False,
     n_jobs: int = 1,
 ) -> None:
@@ -426,9 +427,20 @@ def run_p3_optimizer(trials: int=None, currencies=None, only: str=None, workers:
     if not currencies:
         currencies = Config.IN_SAMPLE
 
-    candidates = C2_CANDIDATES
+    c1_cls = type(Bt_Config.C1)
     if only:
-        candidates = [c for c in C2_CANDIDATES if c.name.lower() == only.lower()]
+        candidates = [c for c in C1_CANDIDATES if c.name.lower() == only.lower()]
         if not candidates:
             raise SystemExit(f"No CANDIDATES entry named '{only}'")
+        # --only names one candidate explicitly, so honor it even if it's
+        # the same indicator type as C1 -- warn instead of silently dropping it.
+        if candidates[0].cls is c1_cls:
+            print(f"[WARN] '{only}' is the same indicator type ({c1_cls.__name__}) as C1 -- running anyway since it was named explicitly.")
+    else:
+        # NNFX rule: C2 must be a different indicator type than C1 (e.g. if
+        # C1 is a LineCrossIndicator, C2 can't be a LineCrossIndicator too),
+        # so it's an independent confirmation rather than a variant of the
+        # same signal.
+        candidates = [c for c in C1_CANDIDATES if c.cls is not c1_cls]
+
     run_all(currencies=currencies, baseline=Bt_Config.BASELINE, c1=Bt_Config.C1, n_trials=trials, candidates=candidates, log_timing=log_timing, n_jobs=workers)

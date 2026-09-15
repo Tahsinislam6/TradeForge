@@ -38,8 +38,9 @@ class _IndicatorCandidate:
     with FixedParam (held constant) in whatever order the indicator expects
     its parameters.
 
-    C1Candidate (Phase 2), C2Candidate (Phase 3), and ExitCandidate (Phase 5)
-    are identical in every field -- a C2 is wired up via Indicator.setup()/
+    C1Candidate (Phase 2, also reused as the Phase 3 C2 pool) and
+    ExitCandidate (Phase 5) are identical in every field -- a C2 is wired up
+    via Indicator.setup()/
     self._indicators the same way a C1 is, so it must equally agree on
     direction before an entry is allowed, but unlike C1 it's
     confirmation-only: it's left out of self._trigger_indicators, so its
@@ -73,20 +74,12 @@ class _IndicatorCandidate:
 
 @dataclass
 class C1Candidate(_IndicatorCandidate):
-    """One C1 indicator to sweep in a Phase 2 batch run. See
-    _IndicatorCandidate for field meanings. With sampler="nsga2", Phase 2's
-    hard constraints are MIN_TRADES/MIN_WIN_RATE/MIN_AVG_BARS_HELD/
+    """One indicator to sweep as C1 in a Phase 2 batch run -- and, since
+    Phase 3 draws its C2 pool from this same list, potentially as C2 too.
+    See _IndicatorCandidate for field meanings. With sampler="nsga2", Phase
+    2's hard constraints are MIN_TRADES/MIN_WIN_RATE/MIN_AVG_BARS_HELD/
     MAX_DRAWDOWN/MIN_PROFIT_FACTOR (scripts/phase2_optimizer.py);
     sampler="grid" only applies the MIN_TRADES prune inside objective()."""
-
-
-@dataclass
-class C2Candidate(_IndicatorCandidate):
-    """One C2 (secondary confirmation) indicator to sweep in a Phase 3 batch
-    run, against a frozen baseline+C1. See _IndicatorCandidate for field
-    meanings. With sampler="nsga2", Phase 3's hard constraints are
-    MIN_TRADES/MIN_WIN_RATE_LIFT/MIN_PROFIT_FACTOR/
-    MIN_TOTAL_LOSSES_REDUCTION_PCT (scripts/phase3_optimizer.py)."""
 
 
 @dataclass
