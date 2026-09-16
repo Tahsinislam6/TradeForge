@@ -20,6 +20,7 @@ def _new_strategy(cls=NNFXBaseStrategy):
     walking the call stack, so these can be exercised standalone."""
     strategy = cls.__new__(cls)
     strategy._pending_triggers = {}
+    strategy._pending_pullbacks = {}
     return strategy
 
 
@@ -836,6 +837,136 @@ def test_process_data_one_candle_grace_does_not_interfere_with_defensive_close()
     strategy._process_data(data)  # bar N+2: the stale pending did not survive the close bar
 
     assert recorded == [("cancel_all", data), ("close", data)]
+
+
+# Pull Back Entry (NNFX flow chart): Baseline gives Signal, C1 (and every
+# other indicator) already agrees, but price is beyond 1x ATR of Baseline.
+# Unlike the one-candle-rule grace, this watch has no 1-bar expiry -- it is
+# rechecked every subsequent bar against Baseline's *current* value (not the
+# signal candle's close) until price closes back within range or the setup
+# is invalidated.
+
+def test_process_data_pullback_persists_past_one_candle_window_and_tracks_current_baseline():
+    """Bar N: baseline triggers long, beyond 1x ATR of baseline -> blocked,
+    both the one-candle grace and the pullback watch are armed. Bar N+1:
+    price has drifted far enough from the *signal candle's* close that the
+    one-candle grace can no longer fire, but it's still beyond 1x ATR of the
+    (now-moved) baseline too, so the pullback watch just keeps waiting.
+    Bar N+2: price is back within 1x ATR of baseline's new value (exactly at
+    the boundary) -- the pullback fires a full two bars after the signal,
+    something the one-candle grace could never do on its own."""
+    strategy, data, recorded = _ready_strategy(direction=Signal.LONG, line_value=90.0, atr_value=1.0)
+    strategy.getposition = lambda d: SimpleNamespace(size=0)
+
+    strategy._process_data(data)  # bar N: signal close = 100, blocked, armed
+    assert recorded == []
+
+    strategy.p.baseline.set_for(data, crossed=False, direction=Signal.LONG, line_value=95.0)
+    data.close[0] = 97.0  # 3 away from signal close (>1 ATR) -- grace expires; 2 from baseline -- pullback keeps waiting
+    strategy._process_data(data)
+    assert recorded == []
+
+    strategy.p.baseline.set_for(data, crossed=False, direction=Signal.LONG, line_value=96.0)
+    # close stays 97.0 -- exactly 1x ATR from baseline's new value
+    strategy._process_data(data)
+
+    assert recorded == [("enter_long", data)]
+
+
+def test_process_data_pullback_fires_on_short_side_when_baseline_returns_within_range():
+    strategy, data, recorded = _ready_strategy(direction=Signal.SHORT, line_value=110.0, atr_value=1.0)
+    strategy.getposition = lambda d: SimpleNamespace(size=0)
+
+    strategy._process_data(data)  # bar N: signal close = 100, blocked, armed
+    assert recorded == []
+
+    strategy.p.baseline.set_for(data, crossed=False, direction=Signal.SHORT, line_value=99.0)
+    data.close[0] = 98.5  # 1.5 away from signal close (>1 ATR, grace blocked); 0.5 from baseline
+    strategy._process_data(data)
+
+    assert recorded == [("enter_short", data)]
+
+
+def test_process_data_pullback_not_armed_by_c1_only_trigger():
+    """A trigger from C1 (not baseline itself) is still eligible for the
+    one-candle grace, but per the flow chart the Pull Back Entry's primary
+    condition is specifically "Baseline gives Signal" -- a C1-only cross
+    must not arm the pullback watch."""
+    strategy = _new_strategy()
+    data = _data(close=100.0)
+    baseline = _FakeIndicator()
+    baseline.set_for(data, crossed=False, direction=Signal.LONG, line_value=90.0)
+    c1 = _FakeIndicator()
+    c1.set_for(data, crossed=True, direction=Signal.LONG, line_value=1.0)
+    strategy._indicators = [baseline, c1]
+    strategy._trigger_indicators = [baseline, c1]
+    strategy.p = SimpleNamespace(baseline=baseline)
+    strategy._state = {id(data): _TwoTradeDataState(atr=[1.0])}
+    recorded = []
+    strategy.getposition = lambda d: SimpleNamespace(size=0)
+    strategy.close = lambda data: recorded.append(("close", data))
+    strategy._cancel_all = lambda d: recorded.append(("cancel_all", d))
+    strategy._enter_long = lambda d: recorded.append(("enter_long", d))
+    strategy._enter_short = lambda d: recorded.append(("enter_short", d))
+
+    strategy._process_data(data)  # bar N: c1 triggers, beyond ATR of baseline -> grace armed, pullback not
+    assert recorded == []
+
+    baseline.set_for(data, crossed=False, direction=Signal.LONG, line_value=90.0)
+    c1.set_for(data, crossed=False, direction=Signal.LONG, line_value=1.0)
+    data.close[0] = 105.0  # far from signal close (100) -> grace expires; still far from baseline too
+    strategy._process_data(data)
+    assert recorded == []
+
+    baseline.set_for(data, crossed=False, direction=Signal.LONG, line_value=104.5)
+    # close stays 105.0 -- now within 1x ATR of baseline; would fire if a pullback had (wrongly) armed
+    strategy._process_data(data)
+
+    assert recorded == []
+
+
+def test_process_data_pullback_invalidated_by_direction_reversal():
+    """A pending pullback must not survive a bar where unanimity no longer
+    matches its armed direction, even without a fresh trigger on that bar --
+    the reversal alone invalidates the setup, same as the one-candle rule's
+    reversal handling."""
+    strategy, data, recorded = _ready_strategy(direction=Signal.LONG, line_value=90.0, atr_value=1.0)
+    strategy.getposition = lambda d: SimpleNamespace(size=0)
+
+    strategy._process_data(data)  # bar N: armed long
+    assert recorded == []
+
+    strategy.p.baseline.set_for(data, crossed=False, direction=Signal.SHORT, line_value=110.0)
+    strategy._process_data(data)  # bar N+1: reversed to short, no fresh cross -> pullback dropped
+    assert recorded == []
+
+    strategy.p.baseline.set_for(data, crossed=False, direction=Signal.LONG, line_value=99.5)
+    # close stays 100.0 -- within 1x ATR of baseline, which would fire if the long pullback had survived
+    strategy._process_data(data)
+
+    assert recorded == []
+
+
+def test_process_data_pullback_dropped_when_entry_allowed_false_during_watch():
+    """Mirrors the one-candle rule's entry_allowed semantics: the volume
+    filter gates arming *and* keeping a pullback alive, not just the final
+    fire -- a miss on any watched bar drops the whole setup."""
+    strategy, data, recorded = _ready_strategy(direction=Signal.LONG, line_value=90.0, atr_value=1.0)
+    strategy.getposition = lambda d: SimpleNamespace(size=0)
+
+    strategy._process_data(data)  # bar N: blocked by baseline distance, armed
+    assert recorded == []
+
+    strategy._entry_allowed = lambda d: False
+    strategy.p.baseline.set_for(data, crossed=False, direction=Signal.LONG, line_value=99.5)
+    strategy._process_data(data)  # bar N+1: price is in range, but the filter says no -> pullback dropped
+    assert recorded == []
+
+    strategy._entry_allowed = lambda d: True
+    strategy.p.baseline.set_for(data, crossed=False, direction=Signal.LONG, line_value=99.5)
+    strategy._process_data(data)  # bar N+2: filter allows again, but the watch didn't survive bar N+1
+
+    assert recorded == []
 
 
 # _entry_allowed / NNFXBaseStrategy._process_data placement (Phase 4's
