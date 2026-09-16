@@ -44,6 +44,21 @@ class _PendingTrigger:
     signal_close: float
 
 
+@dataclass(frozen=True)
+class _PendingPullback:
+    """Pull Back Entry watch state (NNFX flow chart): Baseline itself gave
+    the signal and every indicator already agreed, but price was beyond 1x
+    ATR of Baseline. Unlike the one-candle-rule grace armed alongside it,
+    this has no 1-bar expiry -- the flow chart's note that the one-candle
+    rule only applies to the Standard/Baseline Cross Entry filters means
+    this instead gets rechecked every subsequent bar against Baseline's
+    *current* value (not the signal candle's close) until price closes back
+    within range, or the setup is invalidated (a fresh trigger overrides it,
+    or unanimity breaks -- see _process_data)."""
+
+    direction: Signal
+
+
 class NNFXBaseStrategy(bt.Strategy):
 
     SL_MULTIPLIER    = 1.5
@@ -77,6 +92,7 @@ class NNFXBaseStrategy(bt.Strategy):
         self._trigger_indicators: list[Indicator] = [self.p.baseline]
         self._state: dict[int, _DataState] = {}
         self._pending_triggers: dict[int, _PendingTrigger] = {}
+        self._pending_pullbacks: dict[int, _PendingPullback] = {}
         self.p.baseline.reset()
         for data in self.datas:
             self.p.baseline.setup(self, data, plot=self.p.plot_indicators)
@@ -89,9 +105,10 @@ class NNFXBaseStrategy(bt.Strategy):
     def _price_within_atr_of_baseline(self, data) -> bool:
         """Standard Entry / Baseline Cross Entry both require price to be
         within 1x ATR of Baseline at entry time (NNFX flow chart) -- beyond
-        that is "a bridge too far" and calls for a Pull Back Entry instead,
-        which this strategy doesn't implement, so such bars simply enter
-        nothing."""
+        that is "a bridge too far". When the trigger was Baseline's own
+        cross, that instead arms a Pull Back Entry watch (see
+        _PendingPullback / _process_data); a Standard Entry (C1-triggered)
+        miss only gets the one-candle grace, per the flow chart."""
         state = self._state[id(data)]
         baseline_value = self.p.baseline.line(data)[0]
         distance = abs(data.close[0] - baseline_value)
@@ -252,6 +269,12 @@ class NNFXBaseStrategy(bt.Strategy):
         # -- a pending grace trigger is checked on exactly the next bar and
         # never survives past it, even if that next bar turns out invalid.
         pending = self._pending_triggers.pop(id(data), None)
+        # Same unconditional-pop pattern for the Pull Back Entry watch: it
+        # only survives this bar if explicitly re-armed further down, which
+        # is what gives it "checked every bar, dropped the instant it no
+        # longer applies" semantics (fresh trigger, reversal, entry_allowed
+        # miss, or NaN/invalid bar) for free, same as the grace trigger.
+        pending_pullback = self._pending_pullbacks.pop(id(data), None)
 
         # NaN-only: the data loader already turns each indicator's own
         # warmup placeholder into NaN (see _nan_leading_warmup), whatever
@@ -271,7 +294,7 @@ class NNFXBaseStrategy(bt.Strategy):
             return
 
         triggered_now = self._any_trigger(data)
-        if not triggered_now and pending is None:
+        if not triggered_now and pending is None and pending_pullback is None:
             return
 
         directions = self._get_directions(data)
@@ -310,9 +333,19 @@ class NNFXBaseStrategy(bt.Strategy):
                     self._enter_long(data)
                 else:
                     self._pending_triggers[id(data)] = _PendingTrigger(Signal.LONG, data.close[0])
+                    # Pull Back Entry's primary condition is specifically
+                    # "Baseline gives Signal" -- a Standard Entry (C1) miss
+                    # only gets the one-candle grace above, never this.
+                    if self.p.baseline.crossed(data):
+                        self._pending_pullbacks[id(data)] = _PendingPullback(Signal.LONG)
             elif pending is not None and pending.direction == Signal.LONG \
                     and self._price_within_atr_of_signal_close(data, pending):
                 self._enter_long(data)
+            elif pending_pullback is not None and pending_pullback.direction == Signal.LONG:
+                if self._price_within_atr_of_baseline(data):
+                    self._enter_long(data)
+                else:
+                    self._pending_pullbacks[id(data)] = pending_pullback  # still watching
 
         elif all_short:
             if position.size < 0:
@@ -327,9 +360,16 @@ class NNFXBaseStrategy(bt.Strategy):
                     self._enter_short(data)
                 else:
                     self._pending_triggers[id(data)] = _PendingTrigger(Signal.SHORT, data.close[0])
+                    if self.p.baseline.crossed(data):
+                        self._pending_pullbacks[id(data)] = _PendingPullback(Signal.SHORT)
             elif pending is not None and pending.direction == Signal.SHORT \
                     and self._price_within_atr_of_signal_close(data, pending):
                 self._enter_short(data)
+            elif pending_pullback is not None and pending_pullback.direction == Signal.SHORT:
+                if self._price_within_atr_of_baseline(data):
+                    self._enter_short(data)
+                else:
+                    self._pending_pullbacks[id(data)] = pending_pullback  # still watching
 
 
 # Phase 1 — Baseline only

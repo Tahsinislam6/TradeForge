@@ -41,7 +41,7 @@ Every entry is split into two positions (`NNFXBaseStrategy`):
 - **t1** — fixed take-profit at 1×ATR
 - **t2** — a runner, stop moved to breakeven once t1 fills
 
-Stop-loss is 1.5×ATR, risk is 2% of equity per trade, and t2 takes 50% of the size. Entries also require price to be within 1×ATR of the baseline, with a **one-candle rule**: if a trigger fires while every layer agrees but price is too far from the baseline, the trade gets exactly one more bar to enter before the signal is dropped.
+Stop-loss is 1.5×ATR, risk is 2% of equity per trade, and t2 takes 50% of the size. Entries also require price to be within 1×ATR of the baseline, with a **one-candle rule**: if a trigger fires while every layer agrees but price is too far from the baseline, the trade gets exactly one more bar to enter before the signal is dropped. When the trigger was the baseline's own cross specifically, a miss also arms a **Pull Back Entry** watch that, unlike the one-candle rule, has no expiry — it keeps rechecking price against the baseline's current value every bar until price closes back within range (or the setup is invalidated by a fresh trigger or a reversal).
 
 ## Repository layout
 
